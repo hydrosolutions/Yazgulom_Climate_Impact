@@ -1,0 +1,2344 @@
+---
+title: "Hydrological Modeling in Atbashy River Basin: Hydrological Modeling (airGR)"
+author: "Tobias Siegfried, hydrosolutions GmbH"
+format: html
+editor: source
+date: "2025-04-29"
+---
+
+# I. BACKGROUND
+
+## Hydrological Modeling in Atbashy River Basin
+
+### Introduction
+
+This script implements a hydrological modeling framework to simulate discharge in Atbashy River Basin, Kyrgyzstan, using the airGR package. The modeling framework is designed to integrate various data sources and methodologies to provide a comprehensive understanding of the hydrological processes in the basin. The primary focus is on simulating the hydrological response to 2017 - 2023 forcing, i.e., the years of the focus of the study by Hannah Schwedhelm.
+
+#### Key Components
+
+1. **Model Structure**
+   - Uses the airGR package's CemaNeige model coupled with GR4J
+   - Implements elevation band discretization to account for orographic effects
+   - Incorporates glacier melt contributions using Rounce et al. (2023) projections
+   - Handles snow/rain partitioning using the Glazirin method calibrated for Central Asian conditions
+
+2. **Data Integration**
+   - Historical climate observations for model forcing
+   - Monthly discharge measurements for calibration and validation of mean monthly flows
+   - Glacier melt data with temperature-based temporal disaggregation
+   - Elevation band-specific precipitation and temperature data
+
+3. **Modeling Framework**
+   - Split-sample calibration and validation approach
+   - Multi-criteria performance evaluation
+   - Latin Hypercube Sampling for parameter uncertainty analysis
+   - Specific focus on snow/rain transition parameterization
+
+#### Objectives
+
+The primary objectives of this modeling exercise are to:
+1. Establish a robust hydrological model for the Atbashy River Basin
+2. Account for the significant role of snow and glacier melt in the basin's hydrology
+3. Provide insights into parameter sensitivity and model uncertainty
+
+This script is a spin off of a larger climate change impact assessment project and builds upon previous data preparation work documented in separate scripts. It is the first time that we try to implement a full modeling chain in R only without RSMINERVE. The script is designed to be modular and adaptable, allowing for easy updates and modifications as new data becomes available or as modeling techniques evolve.
+
+
+# II. Change Log
+- **2024-11-19**:
+  - Initial setup.
+- **2024-11-20**:
+  - Integration with the data preparation script.
+- **2024-11-21**:
+  - Simple monthly to daily glacier melt data disaggregation implemented.
+  - Testing the teaching package.
+- **2024-11-24**:
+  - continuing investigation into CEMA-Neige.
+- **2024-11-25**: 
+  - Way forward is clear. airGR::CreateInputsModel produces elevation bands specific model input. We can just overwrite the results from the data_preparation.qmd script where we have prepared elevation band data for P and T. 
+- **2024-11-26**:
+  - Continuing with hydro modeling using airGR.
+  - The temperature to peak discharge sensitivity is stunning. We get a good calibration during the summer months if we lower the 'observed' temperatures by 10°C. On the plot with the rolling mean, the calibrated peak discharge coincides well with the observed discharge. However, under such scheme, the winter discharge is mostly overestimated. This sensitivity shows the importance of 'bias correcting' the CHELSA V21 temperature fields.
+- **2024-11-28**:
+  - Progressing on climate impact implementation
+  - functions now in separate R scripts. The deep rationale for this was to be able to provide them as context to Claude. It does not work with .qmd script files.
+- **2024-11-29**:
+  - Running climate simulations now and starting to analyze outputs.
+  - Export of relevant results for later analysis.    
+- **2024-12-02**:
+  - Streamlining code and improving documentation.
+- **2024-12-03**:
+  - Need for resetting snow every 5 years to avoid issue with snow accumulation in high elevation catchments. 
+- **2024-12-04**:
+  - Code updated. Results looking good.
+  - Added shiny figure plotting.
+- **2024-12-06**:
+  - Finalizing the script for error checking. It fully replaces the climate impact analysis script.
+- **2025-02-27**:
+  - Validating code and crosschecking if all works.
+- **2025-03-06**:
+  - Preparing script for use with Positron IDE.
+- **2025-04-28**:
+  - Adaptation for Atbashy hydrological modeling study
+- **2025-04-29**:
+  - Working on the calibration of the GR4J model with daily inputs and monthly discharge observations.
+
+# 1. CONFIGURATIONS & FUNCTIONS
+
+## 1.0 Configurations
+
+```{r}
+# Load the centralized configuration
+library(pacman)
+p_load(here, tidyverse, lubridate)
+
+path = here::here("01_code", "config_param.R")
+source(path)
+```
+
+## 1.0 Source functions
+
+```{r}
+source(here::here("01_code", "functions", "disaggregate_glacier_melt.R"))
+source(here::here("01_code", "functions", "solid_fraction_elevation_layer.R"))
+source(here::here("01_code", "functions", "process_rsminerve_climate_files.R"))
+source(here::here("01_code", "functions", "process_glacier_data.R"))
+source(here::here("01_code", "functions", "plot_calib_valid_period.R"))
+source(here::here("01_code", "functions", "create_basin_scenario_model_ts.R"))
+source(here::here("01_code", "functions", "process_inputs_models_scenarios.R"))
+source(here::here("01_code", "functions", "run_climate_scenarios.R"))
+source(here::here("01_code", "functions", "plot_flexible_hydrograph.R"))
+source(here::here("01_code", "functions", "calculate_exceedance.R"))
+source(here::here("01_code", "functions", "plot_exceedance.R"))
+source(here::here("01_code", "functions", "adaptive_lhs_calibration.R"))
+source(here::here("01_code", "functions", "parameter_space_visualization_functions.R"))
+```
+
+# 2. PARAMETERS & DATA
+
+## 2.1 Parameters
+
+Loading data that was produced in the data preparation script. This includes the basin information and the calibration/validation periods. 
+
+```{r}
+# Basin information
+Basin_Info <- read_rds(file.path(config$paths$data_path, "Basin_Info.rds"))
+Basin_Info |> summary()
+
+# time periods and calibration/validation periods
+cal_val_per <- readRDS(file.path(config$paths$data_path, "Calibration_Validation_Period.rds"))
+cal_val_per |> summary()
+
+# Snow reset level and threshold. This is the level at which the snow is reset in the model at the end of a simulation period chunk. This is important to avoid consistent snow accumulation in high elevation catchments. All is in mm.
+snow_reset_level <- 0 # mm
+snow_reset_threshold <- 1000 # mm
+```
+
+## 2.2 Data
+
+### Discharge Data (HIST_OBS)
+
+Setting up monthly discharge data. 
+
+```{r}
+#| warning: false
+
+q <- readRDS(file.path(paste0(config$paths$data_path,"/Discharge"), "q_cal_val.rds"))
+
+# set date column to first day of month
+q <- q |> 
+  mutate(date = ymd(date)) |> 
+  mutate(date = floor_date(date, "month"))
+
+# Add specific discharge in mm/day
+q <- q |> 
+  rename(Q_m3_sec = value) |>
+  mutate(Q_mm_day = Q_m3_sec / as.numeric(Basin_Info$BasinArea_m2) * 10^3 * 3600 * 24) |> 
+  dplyr::select(-data)
+
+# Add/Update period information
+## Filter out data prior to 1979-01-01
+q <- q[complete.cases(q), ]
+
+## Set warmup period
+n_warmup_years <- 3
+
+## reset labels
+q <- q %>%
+  mutate(Period = case_when(
+    date < cal_val_per$calib_start + years(n_warmup_years) - days(1) ~ "Warmup",
+    date >= cal_val_per$calib_start & date <= cal_val_per$calib_end ~ "Calibration",
+    date > cal_val_per$valid_start & date <= cal_val_per$valid_end ~ "Validation"
+  ))
+
+plot_calib_valid_period(q)
+
+# summarize by time compute annual discharge stats
+q |> 
+  group_by(Period) |>  
+  timetk::summarize_by_time(.date_var = date, .by = "year", 
+                            Q_mm_day = sum(Q_mm_day) * 3600 * 24 * 365.25 / 10^9) |> 
+  summary()
+```
+
+### Forcing Data (HIST_OBS)
+
+Here, we load hist_obs forcing data and then average over the elevation bands. 
+Depending on the availability of station data, we can correct the CHELSA V21 forcing fields. 
+
+```{r}
+#| warning: false
+#| echo: false
+
+hist_obs <- read_csv(file.path(config$paths$model_dir, "forcing/hist_obs_rsm.csv"), 
+                     col_names = FALSE,
+                     show_col_types = FALSE) 
+# delete the last column in hist_obs (discharge measured at the gauge) for hist_obs
+hist_obs <- hist_obs %>% dplyr::select(-ncol(hist_obs)) 
+
+hist_obs_processed <- process_rsminerve_climate_files(hist_obs)
+
+dates_tbl <- hist_obs_processed$dates
+hist_obs_T_bands <- hist_obs_processed$T_bands
+hist_obs_P_bands <- hist_obs_processed$P_bands
+
+hist_obs_T <- hist_obs_T_bands |>rowMeans()
+hist_obs_P <- hist_obs_P_bands |>rowMeans()
+```
+
+### Glacier Data (HIST_OBS)
+
+Subtract the monthly Rounce et al. 2023 data from the monthly discharge data of the hist_obs period and create net discharge time series.
+
+```{r}
+#| warning: false
+#| message: false
+#| echo: false
+
+# Load the glacier data
+qg_mon <- read_csv(file = file.path(config$paths$glacier_path, "glaciers_hist_obs_rsm.csv"))
+qg_mon <- qg_mon |> 
+  slice(-1:-7)# Remove the first 7 rows
+
+# Now rename and calculate
+qg_mon <- qg_mon %>% 
+  rename(Q_m3_sec = `Glacier 16076`) %>%  # Note the backticks for column names with spaces
+  rename(date = Station) |> 
+  mutate(Q_m3_sec = as.numeric(Q_m3_sec),  # Ensure the column is numeric
+         Q_mm_day = Q_m3_sec / as.numeric(Basin_Info$BasinArea_m2) * 10^3 * 3600 * 24)
+
+monthly_melt <- qg_mon |> 
+  dplyr::select(date, Q_mm_day) |> rename(melt = Q_mm_day) |> 
+  mutate(date = dmy_hms(date)) |> 
+  mutate(date = date(date)) #|>
+  #mutate(date = ceiling_date(date, "month") - days(1))
+
+```
+
+### Discharge net Glacier Melt
+
+```{r}
+monthly_melt
+
+q <- q |> 
+  left_join(monthly_melt, by = "date") |> 
+  mutate(melt = ifelse(is.na(melt), 0, melt)) |> 
+  mutate(Q_net_melt_mm_day = Q_mm_day - melt)
+
+# plot Q_net_melt_mm_day time series
+q |> 
+  dplyr::select(date, Q_net_melt_mm_day, melt) |> 
+  pivot_longer(-date) |> 
+  #group_by(name) |> 
+  timetk::plot_time_series(.date_var = date, .value = value, 
+                   .smooth = FALSE, .color_var = name,
+                   .title = "Discharge without Glacier Contribution")
+```
+
+### Final Dataframe via combination of data
+
+```{r}
+#| warning: false
+#| message: false
+#| echo: false
+
+# Combine the data
+forcing_q_ts <- data.frame(date = dates_tbl$value, 
+                         #julian day
+                         JourJul = yday(dates_tbl$value),
+                         Ptot = hist_obs_P, 
+                         Temp = hist_obs_T) 
+
+# add discharge
+
+q_net_melt_mm_day <- q %>% dplyr::select(date,Q_net_melt_mm_day)
+
+forcing_q_ts <- forcing_q_ts |> 
+  left_join(q_net_melt_mm_day, by = "date") |> 
+  rename(Q_mm_day = Q_net_melt_mm_day)
+
+# compute potential ET using Oudin method
+PET = airGR::PE_Oudin(JD = forcing_q_ts$JourJul, 
+                      Temp = forcing_q_ts$Temp, 
+                      Lat = Basin_Info$BasinLat_rad, 
+                      LatUnit = "rad", 
+                      TimeStepIn = "daily", 
+                      TimeStepOut = "daily")
+
+# bind all together
+forcing_q_ts <- cbind(forcing_q_ts, PET = PET)
+
+# visualize
+forcing_q_ts |> 
+  dplyr::select(date, Q_mm_day, Ptot, Temp, PET) |>
+  pivot_longer(cols = c(Q_mm_day, Ptot, Temp, PET), names_to = "Variable", values_to = "Value") |> 
+  # generate an interactive plot
+  ggplot(aes(x = date, y = Value, group = Variable)) +
+  geom_line(aes(color = Variable)) +
+  geom_point(aes(color = Variable)) +
+  labs(x = "Date", y = "Value", color = "Variables") +
+  theme_minimal()
+
+# save as csv on disc
+write_csv(forcing_q_ts, file.path(config$paths$model_dir, "forcing_q_ts.csv"))
+```
+
+# 3. MODEL
+
+## 3.0 Model Specific Setup
+```{r}
+# Load the data
+basin_obs_ts <- forcing_q_ts |> 
+  rename(Q_mm_day_no_glacier = Q_mm_day)
+
+# setting calib_end
+cal_val_per$calib_end <- ymd(cal_val_per$calib_end)
+
+# indexing calibration time steps
+indRun_cal <- which(basin_obs_ts$date >= cal_val_per$calib_start & 
+                      basin_obs_ts$date <= cal_val_per$calib_end)
+indRun_cal_max <- indRun_cal |> max()
+
+# model to use 
+model_2_use <- "GR4J"
+
+if (model_2_use == "GR4J") {
+  fun_model <- airGR::RunModel_CemaNeigeGR4J
+} else if (model_2_use == "GR5J") {
+  fun_model <- airGR::RunModel_CemaNeigeGR5J
+} else if (model_2_use == "GR6J") {
+  fun_model <- airGR::RunModel_CemaNeigeGR6J
+}
+
+# warmup period
+n_warmup_years <- 3
+warmup_period_ind <- 1:(365*n_warmup_years + 1)
+# calibration period
+indRun_cal <- indRun_cal + length(warmup_period_ind)
+indRun_cal <- indRun_cal[indRun_cal<=indRun_cal_max] # this makes sure that we remain < calib_end period
+# validation period
+indRun_val <- which(basin_obs_ts$date >= cal_val_per$valid_start & 
+                      basin_obs_ts$date <= cal_val_per$valid_end)
+
+# transformation
+transfo = ""
+
+# performance criteria
+fun_crit = airGR::ErrorCrit_NSE
+weights = c(1)
+
+#fun_crit = list(ErrorCrit_NSE, ErrorCrit_RMSE)
+#weights = c(1/2, 1/2)
+
+# testing custom function
+#fun_crit = ErrorCrit_NSE_Monthly
+#weights = c(1)
+
+# observation
+q_obs_cal = basin_obs_ts$Q_mm_day_no_glacier[indRun_cal]
+q_obs_val = basin_obs_ts$Q_mm_day_no_glacier[indRun_val]
+```
+
+
+## 3.1 Prepare Model
+
+Note: We ran the parameter optimization experiment in the X.EXPERIMENT section below. The best parameters for tas_min and tas_max were found to be 8.56 and 9.97, respectively.
+
+```{r}
+# preparation of input data
+inputsModel <- airGR::CreateInputsModel(FUN_MOD            = fun_model, 
+                                        DatesR             = basin_obs_ts$date,
+                                        Precip             = basin_obs_ts$Ptot, 
+                                        PotEvap            = basin_obs_ts$PET,
+                                        TempMean           = basin_obs_ts$Temp, 
+                                        HypsoData          = Basin_Info$HypsoData,
+                                        ZInputs            = median(Basin_Info$HypsoData),
+                                        NLayers            = length(Basin_Info$ZLayers))
+
+# overwrite airGR CemaNeige elevation bands data with our own.
+inputsModel_ours <- inputsModel
+inputsModel_ours$LayerTempMean <- hist_obs_T_bands |> as.list() 
+inputsModel_ours$LayerPrecip <- hist_obs_P_bands |> as.list()
+
+# compute the fraction of solid precipitation on the layer. # tas_min and tas_max are the best parameters found in the experiment under Section X below.
+solid_frac_pr <- solid_fraction_elevation_layer(Basin_Info,
+                                                  inputsModel_ours$LayerTempMean, 
+                                                  tas_min  = 8.56, 
+                                                  tas_max  = 9.97) 
+
+inputsModel_ours$LayerFracSolidPrecip <- solid_frac_pr
+# overwrite original
+inputsModel <- inputsModel_ours
+
+# What we are doing here is to overwrite the setup prepared in the airGR::CreateInputsModel() script. In other words, we just use the data from the data_preparation script.
+runOptions_cal <- airGR::CreateRunOptions(FUN_MOD          = fun_model,
+                                          InputsModel      = inputsModel,
+                                          IndPeriod_Run    = indRun_cal,
+                                          IniStates        = NULL,
+                                          IniResLevels     = NULL,
+                                          IndPeriod_WarmUp = warmup_period_ind,
+                                          IsHyst           = FALSE,
+                                          warnings         = FALSE)
+ 
+inputsCrit_cal <- airGR::CreateInputsCrit(FUN_CRIT         = fun_crit,
+                                          InputsModel      = inputsModel,
+                                          RunOptions       = runOptions_cal,
+                                          transfo          = transfo,
+                                          Obs              = q_obs_cal,
+                                          warnings         = FALSE,
+                                          Weights          = weights)
+
+calibOptions <- airGR::CreateCalibOptions(FUN_MOD          = fun_model, 
+                                          FUN_CALIB        = airGR::Calibration_Michel)
+```
+
+
+## 3.2 Model Calibration
+
+```{r}
+#| warnings: off
+
+outputsCalib <- airGR::Calibration_Michel(InputsModel      = inputsModel,
+                                   RunOptions              = runOptions_cal,
+                                   InputsCrit              = inputsCrit_cal,
+                                   CalibOptions            = calibOptions,
+                                   FUN_MOD                 = fun_model)
+```
+
+# 4. RESULTS
+
+## 4.1 Calibration Results
+```{r}
+# calibration period
+param <- outputsCalib$ParamFinalR
+
+# switch call of function depending on fun_model
+if (model_2_use == "GR4J") {
+  runResults_cal <- airGR::RunModel_CemaNeigeGR4J(
+                                           InputsModel     = inputsModel,
+                                           RunOptions      = runOptions_cal,
+                                           Param           = param)
+} else if (model_2_use == "GR5J") {
+  runResults_cal <- airGR::RunModel_CemaNeigeGR5J(InputsModel     = inputsModel,
+                                           RunOptions      = runOptions_cal,
+                                           Param           = param)
+} else if (model_2_use == "GR6J") {
+  runResults_cal <- airGR::RunModel_CemaNeigeGR6J(InputsModel     = inputsModel,
+                                           RunOptions      = runOptions_cal,
+                                           Param           = param)
+}
+
+plot(runResults_cal, Qobs = basin_obs_ts$Q_mm_day[indRun_cal])
+
+OutputsCrit <- airGR::ErrorCrit_NSE(InputsCrit = inputsCrit_cal, OutputsModel = runResults_cal)
+OutputsCrit
+
+obs_monthly_cal <- q %>%
+  filter(date >= cal_val_per$calib_start & date <= cal_val_per$calib_end)
+
+
+# Plot monthly comparison
+plot_monthly_comparison(
+  runResults_cal,
+  obs_monthly_cal,
+  basin_obs_ts$date[indRun_cal],
+  "Calibration Period"
+)
+```
+
+## 4.2 Validation Period
+
+NSE = 0.51, (no calibration of tas_min and tas_max of solid/liquid precipitation threshold temps).
+NSE = 0.66 with calibration.
+
+```{r}
+runOptions_val <- airGR::CreateRunOptions(FUN_MOD          = fun_model,
+                                          InputsModel      = inputsModel,
+                                          IndPeriod_Run    = indRun_val,
+                                          IniStates        = runResults_cal$StateEnd,
+                                          IniResLevels     = NULL)
+
+inputsCrit_val <- airGR::CreateInputsCrit(FUN_CRIT         = fun_crit,
+                                          InputsModel      = inputsModel,
+                                          RunOptions       = runOptions_val,
+                                          transfo          = transfo,
+                                          Obs              = q_obs_val,
+                                          Weights          = weights)
+
+# switch call of function depending on fun_model
+if (model_2_use == "GR4J") {
+  runResults_val <- airGR::RunModel_CemaNeigeGR4J(InputsModel     = inputsModel,
+                                           RunOptions      = runOptions_val,
+                                           Param           = param)
+} else if (model_2_use == "GR5J") {
+  runResults_val <- airGR::RunModel_CemaNeigeGR5J(InputsModel     = inputsModel,
+                                           RunOptions      = runOptions_val,
+                                           Param           = param)
+} else if (model_2_use == "GR6J") {
+  runResults_val <- airGR::RunModel_CemaNeigeGR6J(InputsModel     = inputsModel,
+                                           RunOptions      = runOptions_val,
+                                           Param           = param)
+}
+
+plot(runResults_val, Qobs = basin_obs_ts$Q_mm_day[indRun_val])
+
+# BELOW SAVE FIGURE DOES NOT WORK
+# # save figure on disc
+# ggsave("validation_period.png", 
+#        plot = p,
+#        path = config$paths$figures_dir,
+#        width = 10, height = 5,
+#        dpi = 600)
+
+OutputsCrit <- airGR::ErrorCrit_NSE(InputsCrit = inputsCrit_val, OutputsModel = runResults_val)
+OutputsCrit
+
+# Get validation observations
+obs_monthly_val <- q %>%
+  filter(date >= cal_val_per$valid_start & date <= cal_val_per$valid_end)
+
+# Plot monthly comparison
+plot_monthly_comparison(
+  runResults_val,
+  obs_monthly_val,
+  basin_obs_ts$date[indRun_val],
+  "Calibration Period"
+)
+```
+
+# 5. CLIMATE RUNS
+
+## 5.1 Future Climate Scenario Data
+
+### Models and GCMs
+
+```{r}
+# GCMs and Scenarios
+models <- c("GFDL-ESM4", "IPSL-CM6A-LR", "MRI-ESM2-0", "UKESM1-0-LL")
+scenarios <- c("ssp126", "ssp245", "ssp370", "ssp585")
+
+models_Scenarios <- base::expand.grid(models,scenarios) %>%
+        dplyr::mutate(model_scenario_combination = paste0(Var1, "_", Var2)) %>%
+        dplyr::select(model_scenario_combination) %>% unlist() %>% as.character()
+```
+
+### Forcing
+```{r}
+#| warning: false
+#| message: false
+
+# Load the future climate forcing data into a list. Load only those files containing bcsd in their file name.
+forcing_dir <- file.path(config$paths$model_dir, "forcing")
+forcing_files <- list.files(forcing_dir, pattern = "bcsd", full.names = TRUE)
+
+# Load the data
+forcing_data <- lapply(forcing_files, function(x) read_csv(x, show_col_types = FALSE))
+names(forcing_data) <- models_Scenarios
+
+# Process the data
+forcing_data_processed <- lapply(forcing_data, process_rsminerve_climate_files)
+```
+
+### Glaciers
+
+#### Data Disaggregation
+
+In this section, we load the glacier data for the future climate scenarios. We will use the glacier data to estimate the glacier contribution to the discharge which is not modelled. For the final results, we will add the simulated discharge to the glacier scenarios to get the total discharge.
+
+```{r}
+# load glacier data which are in the folder ../02_data/Glaciers. Load only data from files containing "glaciers_fut_" in their name.
+glacier_files <- list.files(config$paths$glacier_path, 
+                            pattern = "glaciers_fut_", full.names = TRUE)
+
+# Load the data. After loading, we will have a list of dataframes. 
+glacier_data <- lapply(glacier_files, function(x) read_csv(x, show_col_types = FALSE))
+names(glacier_data) <- scenarios
+
+#For each dataframe, we delete the first 7 rows, rename the first column to date and the second to value. we convert the first column to date format and the last one to dbl. The resulting data are in m3/s. 
+glacier_data <- lapply(glacier_data, function(x) {
+  x <- x |> 
+    # delete first 7 rows
+    slice(-1:-7) |>
+    rename(date = 1, Q_m3_sec = 2) |>
+    mutate(date = dmy_hms(date), 
+           Q_m3_sec = as.numeric(Q_m3_sec),
+           Q_mm_day = Q_m3_sec / as.numeric(Basin_Info$BasinArea_m2) * 10^3 * 3600 * 24)
+})
+
+# Use the function to process all data
+glacier_data_disaggregated <- process_glacier_data(
+  glacier_data = glacier_data,
+  forcing_data_processed = forcing_data_processed,
+  gcm_Models = models,
+  gcm_Scenarios = scenarios
+)
+
+# convert glacier_data_disaggregated to dataframe
+glacier_data_disaggregated_df <- map_dfr(names(glacier_data_disaggregated), function(scenario) {
+  map_dfr(names(glacier_data_disaggregated[[scenario]]), function(model) {
+    glacier_data_disaggregated[[scenario]][[model]] %>%
+      mutate(
+        scenario = scenario,
+        model = model
+      )
+  })
+})
+```
+
+#### Visual Inspection
+
+```{r}
+# Convert nested list to a single dataframe for plotting
+plot_data <- map_dfr(names(glacier_data_disaggregated), function(scenario) {
+  map_dfr(names(glacier_data_disaggregated[[scenario]]), function(model) {
+    glacier_data_disaggregated[[scenario]][[model]] %>%
+      mutate(
+        scenario = scenario,
+        model = model
+      )
+  })
+}) 
+
+# Create the plot
+pl <- ggplot(plot_data, aes(x = date, y = melt, color = model)) +
+  geom_line(alpha = 0.8) +
+  facet_wrap(~scenario, scales = "fixed", ncol = 2) +
+  theme_minimal() +
+  labs(
+    title = "Disaggregated Daily Glacier Melt by Model and Scenario",
+    x = "Date",
+    y = "Daily Melt (mm/day)",
+    color = "Climate Model"
+  ) +
+  theme(
+    legend.position = "bottom",
+    strip.text = element_text(face = "bold"),
+    plot.title = element_text(hjust = 0.5)
+  ) +
+  scale_color_brewer(palette = "Set2")
+
+# Save the plot if needed
+ggsave("glacier_melt_comparison.png", 
+       path = config$paths$figures,
+       width = 10, height = 6)
+
+
+# save daily glacier melt data (plot_data) as csv file for later analysis
+#write_csv(plot_data, file.path("../05_models/Scenario_simulation", "fut_sim_qgl_mm_models_scenarios.csv"))
+
+# Plot on screen
+pl
+```
+
+These data need to be added to the simulated discharge data to get the total future discharge.
+
+#### Annual Averages
+
+We can also plot annual averages of the glacier melt data to see the trends.
+
+```{r}
+# Calculate ensemble mean and annual totals in km3
+annual_melt <- plot_data %>%
+ group_by(date, scenario) %>%
+ summarize(melt = mean(melt), .groups = "drop") %>%
+ mutate(year = year(date)) %>%
+ group_by(year, scenario) %>% 
+ summarize(
+   annual_melt = sum(melt) * as.numeric(Basin_Info$BasinArea_m2) / 10^9 / 1000, # Convert mm to km3
+   .groups = "drop"
+ )
+
+# Create decade breaks
+decade_breaks <- seq(
+ from = floor(min(annual_melt$year) / 10) * 10,
+ to = ceiling(max(annual_melt$year) / 10) * 10,
+ by = 10
+)
+
+pl <- ggplot(annual_melt, aes(x = year, y = annual_melt, color = scenario)) +
+ geom_line(linewidth = 1, alpha = 0.9) +
+ geom_point(size = 1.5, alpha = 0.7) +
+ # Add smoothed lines
+ geom_smooth(linewidth = .5, method = "loess", span = 0.5, se = FALSE) +
+ scale_color_manual(
+   values = config$colors$scenario_colors,
+   labels = config$colors$scenario_labels,
+   name = "Climate Scenario"
+ ) +
+ scale_x_continuous(
+   breaks = decade_breaks,
+   expand = expansion(mult = 0.02)
+ ) +
+ scale_y_continuous(
+   labels = scales::number_format(accuracy = 0.01),
+   expand = expansion(mult = 0.05)
+ ) +
+ labs(
+   title = "Projected Annual Glacier Melt Under Climate Change Scenarios",
+   subtitle = "Model ensemble means",
+   x = "Year",
+   y = expression("Annual Melt (km"^3*"/a)"),
+   caption = sprintf("Period: %d-%d", min(annual_melt$year), max(annual_melt$year))
+ ) +
+ theme_light() +
+ theme(
+   plot.title = element_text(face = "bold", size = 14, margin = margin(b = 10)),
+   plot.subtitle = element_text(size = 12, color = "gray30", margin = margin(b = 10)),
+   plot.caption = element_text(color = "gray30", hjust = 0, margin = margin(t = 10)),
+   axis.title = element_text(size = 11, face = "bold"),
+   axis.text = element_text(size = 10),
+   axis.text.x = element_text(angle = 45, hjust = 1),
+   legend.position = "top",
+   legend.title = element_text(face = "bold"),
+   legend.text = element_text(size = 10),
+   legend.margin = margin(b = 10),
+   panel.grid.minor = element_blank(),
+   panel.grid.major = element_line(color = "gray90"),
+   panel.border = element_rect(color = "gray80"),
+   plot.margin = margin(t = 20, r = 20, b = 20, l = 20)
+ )
+
+
+# save plot
+ggsave("glacier_melt_annual.png", 
+       plot = pl,
+       path = config$paths$figures,
+       width = 10, height = 6)
+
+# plot on screen
+pl
+```
+
+#### Analysis of Change of Monthly Discharge
+Lets do a seasonal diagnostics plot to see changes and trends and to understand if this makes sense.
+
+```{r}
+#| warning: false
+#| echo: false
+#| message: false
+
+# Create the base plot and store it for scenario 585
+p_585_monthly <- glacier_data$ssp585 |> 
+  rename(date = date, value = Q_mm_day) |> 
+  dplyr::select(-Q_m3_sec) |>
+  timetk::tk_ts(frequency = 12) |> 
+  forecast::ggsubseriesplot(year.labels = FALSE)
+
+# Modify the stored plot object
+p_585_monthly <-  p_585_monthly + 
+  geom_smooth(method = "lm", color = "red") +
+  xlab('Month') +
+  ylab('Melt [mm/mon]') +
+  ggtitle('SSP5-8.5') +
+  theme_minimal() +
+  scale_y_continuous(limits = c(0, 3))
+
+# Create the base plot and store it for scenario 370
+p_370_monthly <- glacier_data$ssp370 |> 
+  rename(date = date, value = Q_mm_day) |> 
+  dplyr::select(-Q_m3_sec) |>
+  timetk::tk_ts(frequency = 12) |> 
+  forecast::ggsubseriesplot(year.labels = FALSE)
+
+# Modify the stored plot object
+p_370_monthly <-  p_370_monthly + 
+  geom_smooth(method = "lm", color = "red") +
+  xlab('Month') +
+  ylab('Melt [mm/mon]') +
+  ggtitle('SSP3-7.0') +
+  theme_minimal() +
+  scale_y_continuous(limits = c(0, 3))
+
+# Create the base plot and store it for scenario 245
+p_245_monthly <- glacier_data$ssp245 |> 
+  rename(date = date, value = Q_mm_day) |> 
+  dplyr::select(-Q_m3_sec) |>
+  timetk::tk_ts(frequency = 12) |> 
+  forecast::ggsubseriesplot(year.labels = FALSE)
+
+# Modify the stored plot object
+p_245_monthly <-  p_245_monthly + 
+  geom_smooth(method = "lm", color = "red") +
+  xlab('Month') +
+  ylab('Melt [mm/mon]') +
+  ggtitle('SSP2-4.5') +
+  theme_minimal() +
+  scale_y_continuous(limits = c(0, 3))
+
+# Create the base plot and store it
+p_126_monthly <- glacier_data$ssp126 |> 
+  rename(date = date, value = Q_mm_day) |> 
+  dplyr::select(-Q_m3_sec) |>
+  timetk::tk_ts(frequency = 12) |> 
+  forecast::ggsubseriesplot(year.labels = FALSE)
+
+# Modify the stored plot object
+p_126_monthly <-  p_126_monthly + 
+  geom_smooth(method = "lm", color = "red") +
+  xlab('Month') +
+  ylab('Melt [mm/mon]') +
+  ggtitle('SSP1-2.6') +
+  theme_minimal() +
+  scale_y_continuous(limits = c(0, 3))
+
+# Combine the plots in a 2 by 2 grid
+p_load(patchwork)
+comb_pl <- (p_126_monthly | p_245_monthly) / (p_370_monthly | p_585_monthly)
+
+# save figure
+ggsave("glacier_melt_monthly_trends.png", 
+       plot = comb_pl,
+       width = 10, 
+       height = 6,
+       path = config$paths$figures)
+
+# Plot on screen
+comb_pl
+```
+
+## 5.2 Hydrological Modeling
+
+Ideally, we just continue with simulations following at the next day after which the validation run had stopped.
+
+### Assemble Data
+
+```{r}
+#| warning: false
+#| echo: false
+
+# Create a list of basin future time series data
+basin_fut_ts <- create_basin_scenario_model_ts(forcing_data_processed, glacier_data_disaggregated)
+# Process the data and generate the model inputs for each list entry (model scenario combination)
+inputs_models_scenarios <- process_inputs_models_scenarios(basin_fut_ts, Basin_Info, fun_model)
+```
+
+### Run Model
+
+This requires that the validation run until end of 2019 has been carried out successfully above.
+
+```{r}
+#| warning: false
+#| echo: false
+#| message: false
+
+p_load(airGR)
+
+# run models
+# reset start state of SWE to 1000 on all layer where SWE > 1000 (1000 is an arbitrary cutoff).
+g_2_reset <- runResults_val$StateEnd$CemaNeigeLayers$G 
+g_2_reset[g_2_reset > snow_reset_threshold] <- snow_reset_level
+runResults_val$StateEnd$CemaNeigeLayers$G <- g_2_reset
+
+# run
+model_runs <- run_climate_scenarios(
+  scenarios = scenarios,
+  models = models,
+  inputs_models_scenarios = inputs_models_scenarios,
+  clim_scen_start = ymd("2020-01-01"),
+  clim_scen_end = ymd("2100-12-31"),
+  model_2_use = model_2_use,
+  param = param,
+  initial_states = runResults_val$StateEnd,
+  reset_years = 5
+)
+
+```
+
+### Results Sample Plot for Validation
+```{r}
+n_elev_band <- 5
+
+# Create time series data
+qsim <- tibble(
+  date = model_runs[[scenarios[4]]][[models[4]]]$DatesR,
+  Qsim = model_runs[[scenarios[4]]][[models[4]]]$Qsim
+) %>%
+  mutate(
+    date = date(date),
+    year = year(date)
+  )
+
+snowpack <- tibble(
+  date = model_runs[[scenarios[4]]][[models[4]]]$DatesR,
+  SnowPack = model_runs[[scenarios[4]]][[models[4]]]$CemaNeigeLayers[[n_elev_band]]$SnowPack
+) %>%
+  mutate(
+    date = date(date),
+    year = year(date)
+  )
+
+# Create decade breaks
+decade_breaks <- seq(from = floor_date(min(qsim$date), unit = "10 years"),
+                    to = ceiling_date(max(qsim$date), unit = "10 years"),
+                    by = "10 years")
+
+# Create plots
+qsim_plot <- ggplot(qsim, aes(x = date, y = Qsim)) +
+  geom_line(color = "#2b8cbe", linewidth = 0.6) +
+  labs(
+    title = "Simulated Discharge",
+    subtitle = paste("Scenario:", scenarios[4], "- Model:", models[4]),
+    x = "Year",
+    y = expression("Discharge [mm day"^-1*"]")#,
+    #caption = paste("Period:", min(qsim$year), "-", max(qsim$year))
+  ) +
+  scale_x_date(
+    breaks = decade_breaks,
+    date_labels = "%Y",
+    expand = c(0.02, 0.02)
+  ) +
+  theme_light() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(size = 12, color = "gray30"),
+    axis.title = element_text(size = 11),
+    axis.text = element_text(size = 10),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_line(color = "gray90"),
+    plot.caption = element_text(hjust = 0, color = "gray30")
+  )
+
+snowpack_plot <- ggplot(snowpack, aes(x = date, y = SnowPack)) +
+  geom_line(color = "#7bccc4", linewidth = 0.6) +
+  labs(
+    title = "Snow Water Equivalent (SWE)",
+    subtitle = paste("Elevation Band ", n_elev_band),
+    x = "Year",
+    y = "SWE [mm]"
+  ) +
+  scale_x_date(
+    breaks = decade_breaks,
+    date_labels = "%Y",
+    expand = c(0.02, 0.02)
+  ) +
+  theme_light() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(size = 12, color = "gray30"),
+    axis.title = element_text(size = 11),
+    axis.text = element_text(size = 10),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_line(color = "gray90")
+  )
+
+pl <- qsim_plot / snowpack_plot +
+  plot_layout(heights = c(1, 1))
+
+# save figure
+ggsave("fut_sim_q_swe.png", 
+       plot = pl,
+       width = 10, height = 6,
+       path = config$paths$figures)
+
+# Plot on screen
+pl
+```
+
+# 6 IMPACT RESULTS
+
+## 6.1 Scenario-, Model-Specific Simulated Discharge Net Melt
+
+```{r}
+#| warning: false
+#| echo: false
+#| message: false
+
+# Inital results testing
+model = models[1]
+scenario = scenarios[1]
+
+# extract DatesR amd Qsim from the model_runs list into a dataframe and plot time series. DatesR and Qsim are list elements.
+
+extract_and_plot_qsim <- function(model_runs) {
+  # Initialize list to store dataframes
+  df_list <- list()
+  
+  # Extract data for each scenario and model
+  for(scenario in names(model_runs)) {
+    for(model in names(model_runs[[scenario]])) {
+      df_list[[paste(scenario, model, sep="_")]] <- tibble(
+        date = model_runs[[scenario]][[model]]$DatesR,
+        qsim = model_runs[[scenario]][[model]]$Qsim,
+        scenario = scenario,
+        model = model
+      )
+    }
+  }
+  
+  # Combine all dataframes
+  df_combined <- bind_rows(df_list)
+  
+  # # Create plot
+  # p <- ggplot(df_combined, aes(x = date, y = qsim, color = model)) +
+  #   geom_line(alpha = 0.7) +
+  #   facet_wrap(~scenario) +
+  #   theme_minimal() +
+  #   labs(x = "Date", y = "Simulated discharge net melt [mm/day]", color = "Model") +
+  #   theme(legend.position = "bottom")
+  
+  return(list(data = df_combined))
+}
+
+# Usage
+results <- extract_and_plot_qsim(model_runs)
+results$data$date <- as.Date(results$data$date)
+
+# Save results$data dataframe to a csv-file
+write_csv(results$data, 
+          file.path("../05_models/Scenario_simulation/", "fut_sim_q_mm_models_scenarios_airGR.csv"))
+
+
+# Extract data for each scenario
+q_sim_net_qgl <- results$data |> 
+  mutate(date = ymd(date))
+
+# merge with glacier melt data
+q_sim <- q_sim_net_qgl |> 
+  left_join(glacier_data_disaggregated_df, by = c("date", "scenario", "model")) |>
+  mutate(Q_mm_day = qsim + melt)
+
+# Average over models
+q_sim_avg <- q_sim |> 
+  group_by(date, scenario) |> 
+  summarize(Q_mm_day = mean(Q_mm_day)) |> 
+  ungroup()
+
+# Create formatted plot with consistent styling
+pl <- ggplot(q_sim, aes(x = date, y = Q_mm_day, color = model)) +
+  geom_line(linewidth = 0.7, alpha = 0.8) +
+  facet_wrap(~scenario, labeller = labeller(
+    scenario = c(
+      "ssp126" = "SSP1-2.6",
+      "ssp245" = "SSP2-4.5",
+      "ssp370" = "SSP3-7.0",
+      "ssp585" = "SSP5-8.5"
+    )
+  )) +
+  scale_color_brewer(
+    palette = "Set2",
+    labels = function(x) str_remove(x, "-ESM.*")
+  ) +
+  scale_x_date(
+    breaks = seq(
+      from = floor_date(min(results$data$date), unit = "10 years"),
+      to = ceiling_date(max(results$data$date), unit = "10 years"),
+      by = "10 years"
+    ),
+    date_labels = "%Y",
+    expand = c(0.02, 0.02)
+  ) +
+  labs(
+    title = "Projected Daily Discharge Under Different Climate Scenarios",
+    subtitle = "Model comparison including glacier melt contribution",
+    x = "Year",
+    y = expression("Net Discharge [mm day"^-1*"]"),
+    color = "GCM"
+  ) +
+  theme_light() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(size = 12, color = "gray30"),
+    axis.title = element_text(size = 11),
+    axis.text = element_text(size = 10),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_line(color = "gray90"),
+    legend.position = "bottom",
+    legend.title = element_text(face = "bold"),
+    strip.background = element_rect(fill = "gray30"),
+    strip.text = element_text(face = "bold", size = 11)
+  )
+
+# save figure
+ggsave("fut_sim_q_mm_models_scenarios.png", 
+       plot = pl,
+       width = 10, height = 6,
+       path = config$paths$figures)
+
+# Plot on screen
+pl
+```
+
+### Combine Discharge Data and Add Period Identifier
+```{r}
+# assemble observed data and future model sensemble mean scenario data
+q_dly_obs_scen <- q_dly |> 
+  dplyr::select(date, Q_mm_day) |> 
+  mutate(scenario = "observation") |> 
+  # add rows
+  bind_rows(q_sim_avg |> 
+              dplyr::select(date, Q_mm_day, scenario))
+
+q_dly_obs_scen <- q_dly |> 
+  dplyr::select(date, Q_mm_day) |> 
+  mutate(scenario = "observation") |> 
+  # add rows
+  bind_rows(q_sim_avg |> 
+              dplyr::select(date, Q_mm_day, scenario))
+
+# Add period indicator where the following holds
+# - p0 is from 01.01.2000 until 31.12.2019
+# - p1 is from 01.01.2020 until 31.12.2040
+# - p2 is from 01.01.2041 until 31.12.2070
+# - p3 is from 01.01.2071 until 31.12.2100
+
+q_dly_obs_scen_per <- q_dly_obs_scen |> 
+  mutate(period = case_when(
+    date >= ymd("2000-01-01") & date <= ymd("2019-12-31") ~ "p0",
+    date >= ymd("2020-01-01") & date <= ymd("2040-12-31") ~ "p1",
+    date >= ymd("2041-01-01") & date <= ymd("2070-12-31") ~ "p2",
+    date >= ymd("2071-01-01") & date <= ymd("2100-12-31") ~ "p3"
+  ))
+```
+
+
+## 6.2 Ensembled Total Discharge
+
+### Daily Discharge
+
+```{r}
+# Create base plot function for reuse
+create_scenario_plot <- function(data, scenario_name, scenario_color, scenario_label) {
+  ggplot(data %>% filter(scenario == scenario_name), 
+         aes(x = date, y = Q_mm_day)) +
+    geom_line(color = scenario_color, linewidth = 0.5) +
+    scale_x_date(
+      breaks = decade_breaks,
+      date_labels = "%Y",
+      expand = c(0.02, 0.02)
+    ) +
+    labs(
+      title = paste("Projected Discharge -", scenario_label),
+      x = "Year",
+      y = expression("Discharge [mm day"^-1*"]")
+    ) +
+    theme_light() +
+    theme(
+      plot.title = element_text(face = "bold", size = 12),
+      axis.title = element_text(size = 10),
+      axis.text = element_text(size = 9),
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      panel.grid.minor = element_blank(),
+      panel.grid.major = element_line(color = "gray90")
+    )
+}
+
+# Create individual plots
+plots <- list()
+for (scenario_name in names(config$colors$scenario_colors)) {
+  plots[[scenario_name]] <- create_scenario_plot(
+    q_sim_avg, 
+    scenario_name,
+    config$colors$scenario_colors[scenario_name],
+    config$colors$scenario_labels[scenario_name]
+  )
+}
+
+# Combine plots
+combined_plot <- wrap_plots(plots, ncol = 2) +
+  plot_annotation(
+    title = "Projected Daily Discharge Under Different Climate Scenarios",
+    subtitle = "Model ensemble means",
+    caption = paste("Period:", format(min(q_sim_avg$date), "%Y"), 
+                   "-", format(max(q_sim_avg$date), "%Y")),
+    theme = theme(
+      plot.title = element_text(face = "bold", size = 14),
+      plot.subtitle = element_text(size = 12, color = "gray30"),
+      plot.caption = element_text(color = "gray30", hjust = 0)
+    )
+  )
+
+# save figure
+ggsave("fut_sim_q_mm_models_scenarios_combined.png",
+       plot = combined_plot,
+       width = 10, height = 6,
+       path = config$paths$figures)
+
+# Display plot
+combined_plot
+```
+
+### Annual Discharge
+
+```{r}
+# Process observed data
+q_obs_annual_km3 <- q_dly %>%
+  mutate(
+    q_km3_day = Q_m3_sec * 3600 * 24 / 1e9,  # Convert m3/day to km3/day
+    year = year(date)
+  ) %>%
+  group_by(year) %>%
+  summarize(
+    annual_vol_km3 = sum(q_km3_day),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    date = ymd(paste0(year, "-01-01")),
+    scenario = "Observed"  # Add scenario label for plotting
+  )
+
+# Combine with projections
+q_annual_km3 <- q_sim_avg %>%
+  mutate(
+    q_m3_day = Q_mm_day * as.numeric(Basin_Info$BasinArea_m2) / 1000,
+    q_km3_day = q_m3_day / 1e9,
+    year = year(date)
+  ) %>%
+  group_by(year, scenario) %>%
+  summarize(
+    annual_vol_km3 = sum(q_km3_day),
+    .groups = "drop"
+  ) %>%
+  mutate(date = ymd(paste0(year, "-01-01"))) %>%
+  bind_rows(q_obs_annual_km3)
+
+pl <- ggplot(q_annual_km3, aes(x = date, y = annual_vol_km3, color = scenario)) +
+  geom_line(linewidth = 0.7) +
+  geom_point(size = 1) +
+  scale_y_continuous(limits = c(0, 30)) +
+  scale_color_manual(
+    values = config$colors$scenario_colors_with_obs,
+    labels = config$colors$scenario_labels_with_obs,
+    breaks = c("Observed", "ssp126", "ssp245", "ssp370", "ssp585")
+  ) +
+  scale_x_date(
+    breaks = seq(
+      from = floor_date(min(q_annual_km3$date), unit = "10 years"),
+      to = ceiling_date(max(q_annual_km3$date), unit = "10 years"),
+      by = "10 years"
+    ),
+    date_labels = "%Y",
+    expand = c(0.02, 0.02)
+  ) +
+  labs(
+    title = "Projected Annual Discharge Volume Under Different Climate Scenarios",
+    subtitle = "Model ensemble means with historical observations",
+    x = "Year",
+    y = expression("Annual Discharge Volume [km"^3*"]"),
+    color = "Scenario",
+    caption = paste("Period:", min(q_annual_km3$year), "-", max(q_annual_km3$year))
+  ) +
+  theme_light() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(size = 12, color = "gray30"),
+    axis.title = element_text(size = 11),
+    axis.text = element_text(size = 10),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_line(color = "gray90"),
+    plot.caption = element_text(hjust = 0, color = "gray30"),
+    legend.position = "top",
+    legend.title = element_text(face = "bold")
+  )
+
+# save plot
+ggsave("fut_sim_q_annual_models_scenarios.png", 
+       plot = pl,
+       width = 10, height = 5,
+       path = config$paths$figures)
+
+# Plot on screen
+pl
+```
+
+### 5-Year Mean Discharge
+
+```{r}
+# Process observed data with 5-year averaging
+q_obs_5year_km3 <- q_dly %>%
+  mutate(
+    q_km3_day = Q_m3_sec * 3600 * 24 / 1e9  # Convert m3/day to km3/day
+  ) %>%
+  # First sum daily values to get annual values
+  group_by(year = year(date)) %>%
+  summarize(
+    annual_vol_km3 = sum(q_km3_day),
+    .groups = "drop"
+  ) %>%
+  # Create 5-year groups and average
+  mutate(year_group = floor(year/5) * 5) %>%
+  group_by(year_group) %>%
+  summarize(
+    annual_vol_km3 = mean(annual_vol_km3),  # Calculate mean of annual values
+    .groups = "drop"
+  ) %>%
+  mutate(
+    date = ymd(paste0(year_group, "-01-01")),
+    scenario = "Observed"  # Add scenario label for plotting
+  )
+
+# Combine with projections using 5-year averages
+q_5year_km3 <- q_sim_avg %>%
+  mutate(
+    q_m3_day = Q_mm_day * as.numeric(Basin_Info$BasinArea_m2) / 1000,
+    q_km3_day = q_m3_day / 1e9
+  ) %>%
+  # First sum daily values to get annual values
+  group_by(year = year(date), scenario) %>%
+  summarize(
+    annual_vol_km3 = sum(q_km3_day),
+    .groups = "drop"
+  ) %>%
+  # Create 5-year groups and average
+  mutate(year_group = floor(year/5) * 5) %>%
+  group_by(year_group, scenario) %>%
+  summarize(
+    annual_vol_km3 = mean(annual_vol_km3),  # Calculate mean of annual values
+    .groups = "drop"
+  ) %>%
+  mutate(date = ymd(paste0(year_group, "-01-01"))) %>%
+  bind_rows(q_obs_5year_km3)
+
+# Create plot with 5-year averages and data-driven y-axis limits
+pl <- ggplot(q_5year_km3, aes(x = date, y = annual_vol_km3, color = scenario)) +
+  geom_line(linewidth = 0.7) +
+  geom_point(size = 1) +
+  scale_y_continuous(
+    expand = expansion(mult = c(0, 0.05)),
+    limits = c(0, NA)  # Start at 0 but let upper limit be data-driven
+  ) +
+  scale_color_manual(
+    values = config$colors$scenario_colors_with_obs, 
+    labels = config$colors$scenario_labels_with_obs,
+    breaks = c("Observed", "ssp126", "ssp245", "ssp370", "ssp585")
+  ) +
+  scale_x_date(
+    breaks = seq(
+      from = floor_date(min(q_5year_km3$date), unit = "10 years"),
+      to = ceiling_date(max(q_5year_km3$date), unit = "10 years"),
+      by = "10 years"
+    ),
+    date_labels = "%Y",
+    expand = c(0.02, 0.02)
+  ) +
+  labs(
+    title = "Projected 5-Year Average Discharge Volume",
+    subtitle = "Model ensemble means with historical observations",
+    x = "Year",
+    y = expression("5-Year Average Annual Discharge Volume [km"^3*"]"),
+    color = "Scenario",
+    caption = paste("Period:", min(q_5year_km3$year_group), "-", max(q_5year_km3$year_group))
+  ) +
+  theme_light() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(size = 12, color = "gray30"),
+    axis.title = element_text(size = 11),
+    axis.text = element_text(size = 10),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_line(color = "gray90"),
+    plot.caption = element_text(hjust = 0, color = "gray30"),
+    legend.position = "top",
+    legend.title = element_text(face = "bold")
+  )
+
+# Save plot
+ggsave("fut_sim_q_5year_models_scenarios.png", 
+       plot = pl,
+       width = 10, height = 5,
+       path = config$paths$figures)
+
+# Plot on screen
+pl
+```
+
+### Long-term Discharge Values
+```{r}
+# aggregate data
+q_model_ensemble_day_stats <- q_dly_obs_scen_per |>
+    group_by(period,scenario) |>
+    #filter(scenario !="HIST_OBS") |>
+    summarize(mean_Q_mm_day = mean(Q_mm_day), sd_Q_mm_day = sd(Q_mm_day), .groups = 'drop')
+
+# plot data
+period_scenario_q_stats_plot <- q_model_ensemble_day_stats |>
+    ggplot(aes(x = period, y = mean_Q_mm_day, fill = scenario)) +
+    geom_bar(stat = "identity", position = "dodge") +
+    #geom_errorbar(aes(ymin = mean_q_sim - sd_q_sim, ymax = mean_q_sim + sd_q_sim),
+    #              position = position_dodge(width = 0.9), width = 0.25) +
+    labs(#title = "Mean Discharge Values per Period and Scenario",
+         x = "Period",
+         y = "Mean discharge [m3/s]",
+         fill = "Scenario") +
+    theme_minimal() +
+    # set colors of scenarios
+    scale_fill_manual(name = "Scenario", values = scenario_colors) +
+# add horizontal line as dashed line using HIST_OBS data
+#geom_hline(data = q_model_ensemble_day_stats |> filter(scenario == "HIST_OBS"), aes(yintercept = mean_Q_mm_day), linetype = "dashed") +
+    theme(legend.position = "right") +
+    #add levels as text
+    geom_text(aes(label = round(mean_Q_mm_day, digits = 2)),
+              vjust = 1.5,
+              size = 3,
+              position = position_dodge(width = 0.9),
+              fontface = "bold")
+
+# Plot on screen
+period_scenario_q_stats_plot
+```
+
+Same plot in mm/day.
+
+```{r}
+# Aggregate data
+q_model_ensemble_day_stats <- q_dly_obs_scen_per |>
+  group_by(period, scenario) |>
+  summarize(
+    mean_Q_mm_day = mean(Q_mm_day),
+    sd_Q_mm_day = sd(Q_mm_day),
+    .groups = 'drop'
+  )
+
+# Create period labels mapping
+period_labels <- c(
+  "p0" = "2000-2019",
+  "p1" = "2020-2040",
+  "p2" = "2041-2070",
+  "p3" = "2071-2100"
+)
+
+ggplot(q_model_ensemble_day_stats, aes(x = period, y = mean_Q_mm_day, fill = scenario)) +
+  geom_bar(stat = "identity", 
+           position = position_dodge(width = 0.9),
+           width = 0.8,
+           color = "black",
+           linewidth = 0.3) +
+  labs(x = "Time Period",
+       y = expression(paste("Mean Specific Discharge [mm/day]")),
+       fill = "Scenario") +
+  theme_minimal() +
+  theme(
+    text = element_text(family = "Arial", size = 12),
+    axis.title = element_text(face = "bold", size = 12),
+    axis.text = element_text(size = 10),
+    legend.title = element_text(face = "bold"),
+    legend.position = "right",
+    panel.grid.major = element_line(color = "gray90"),
+    panel.grid.minor = element_blank(),
+    plot.margin = margin(t = 20, r = 20, b = 20, l = 20)
+  ) +
+  scale_fill_manual(values = scenario_colors) +
+  scale_x_discrete(labels = period_labels) +
+  geom_text(aes(label = sprintf("%.1f", mean_Q_mm_day)),
+            position = position_dodge(width = 0.9),
+            vjust = -0.5,
+            size = 3.5,
+            fontface = "bold")
+```
+
+### Interannual Discharge Variability
+
+```{r}
+# Function to calculate indicators
+calculate_indicators <- function(data) {
+  mean_q <- mean(data$Q_mm_day, na.rm = TRUE)
+  sd_q <- sd(data$Q_mm_day, na.rm = TRUE)
+  cv <- sd_q / mean_q
+  range_q <- max(data$Q_mm_day, na.rm = TRUE) - min(data$Q_mm_day, na.rm = TRUE)
+  iqr_q <- IQR(data$Q_mm_day, na.rm = TRUE)
+  
+  return(data.frame(
+    Indicator = c("Coefficient of Variation (CV) [-]", "Standard Deviation [m3/s]", "Interannual Range [m3/s]", "Interquartile Range (IQR) [m3/s]"),
+    Value = c(cv, sd_q, range_q, iqr_q)
+  ))
+}
+
+generate_indicator_table <- function(data, scen) {
+  ind_table <- data %>%
+    filter(scenario == scen | scenario == "observation") %>%
+    group_by(period) %>%
+    do(calculate_indicators(.)) %>%
+    spread(key = period, value = Value) %>%
+    mutate(across(where(is.numeric), ~round(., digits = 2)))
+  colnames(ind_table) <- c(paste("Indicator", scen), "p0", "p1", "p2", "p3")
+  return(ind_table)
+}
+
+ind_table_ssp126 <- generate_indicator_table(q_dly_obs_scen_per, "ssp126")
+ind_table_ssp245 <- generate_indicator_table(q_dly_obs_scen_per, "ssp245")
+ind_table_ssp370 <- generate_indicator_table(q_dly_obs_scen_per, "ssp370")
+ind_table_ssp585 <- generate_indicator_table(q_dly_obs_scen_per, "ssp585")
+
+ind_table_ssp126
+ind_table_ssp245
+ind_table_ssp370
+ind_table_ssp585
+```
+
+### Percentage of years above/below threshold
+```{r}
+# Compute the threshold
+threshold <- q_dly_obs_scen_per |> 
+    filter(scenario == "observation") |> 
+    summarize(threshold = quantile(Q_mm_day, probs = 0.95, na.rm = TRUE)) |> 
+    pull()
+
+threshold
+
+# Compute the percentage of years above the threshold
+percentage_above_threshold <- q_dly_obs_scen_per |> 
+    group_by(scenario, period) |> 
+    summarize(percentage_above_threshold = 100*mean(Q_mm_day > threshold, na.rm = TRUE)) |> 
+    pivot_wider(names_from = period, values_from = percentage_above_threshold) |> 
+    # round the values
+    mutate(across(where(is.numeric), ~round(., digits = 1)))
+
+percentage_above_threshold
+```
+
+```{r}
+# Compute the threshold
+threshold <- q_dly_obs_scen_per |> 
+    filter(scenario == "observation") |> 
+    summarize(threshold = quantile(Q_mm_day, probs = 0.05, na.rm = TRUE)) |> 
+    pull()
+
+threshold
+
+# Compute the percentage of years above the threshold
+percentage_below_threshold <- q_dly_obs_scen_per |> 
+    group_by(scenario, period) |> 
+    summarize(percentage_above_threshold = 100*mean(Q_mm_day < threshold, na.rm = TRUE)) |> 
+    pivot_wider(names_from = period, values_from = percentage_above_threshold) |> 
+    # round the values
+    mutate(across(where(is.numeric), ~round(., digits = 1)))
+
+percentage_below_threshold
+```
+
+
+## 6.3 Discharge Seasonality
+
+### Monthly Seasonality
+
+```{r}
+seasonality_monthly_pl <- plot_flexible_hydrograph(q_dly_obs_scen_per, aggregation = "monthly")
+seasonality_monthly_pl
+# save figure
+ggsave(file.path(config$paths$figures_path,paste0("monthly_seasonality_climate_scenarios.png")), 
+       plot = seasonality_monthly_pl, 
+       width = 10, height = 6)
+```
+
+### Weekly Seasonality
+
+```{r}
+#| warning: false
+#| 
+
+seasonality_weekly_pl <- plot_flexible_hydrograph(q_dly_obs_scen_per, aggregation = "weekly")   # For weekly
+seasonality_weekly_pl
+# save figure
+ggsave(file.path(fig_rep,paste0("weekly_seasonality_climate_scenarios.png")), 
+       plot = seasonality_weekly_pl, 
+       width = 10, height = 6, dpi = 600)
+ggsave(file.path("../06_figures",paste0("weekly_seasonality_climate_scenarios.png")), 
+       plot = seasonality_weekly_pl, 
+       width = 10, height = 6, dpi = 600)
+```
+
+### Ratio Stats Plotting Function
+```{r}
+library(dplyr)
+library(ggplot2)
+library(lubridate)
+
+plot_seasonal_discharge_ratio <- function(data, scenario_colors, 
+                                        numerator_months, denominator_months,
+                                        ratio_name = NULL) {
+  # Validate month inputs
+  if (!all(numerator_months %in% 1:12) || !all(denominator_months %in% 1:12)) {
+    stop("Months must be integers between 1 and 12")
+  }
+  
+  # Set default ratio name if not provided
+  if (is.null(ratio_name)) {
+    ratio_name <- paste(
+      paste(sort(numerator_months), collapse=","),
+      "/",
+      paste(sort(denominator_months), collapse=",")
+    )
+  }
+  
+  # Calculate discharge volumes
+  seasonal_ratio <- data %>%
+    mutate(
+      month = month(date),
+      year = year(date)
+    ) %>%
+    # Calculate volumes for both parts
+    group_by(year, scenario, period) %>%
+    summarise(
+      numerator_volume = sum(Q_mm_day[month %in% numerator_months]),
+      denominator_volume = sum(Q_mm_day[month %in% denominator_months]),
+      .groups = "drop"
+    ) %>%
+    # Calculate ratio
+    mutate(ratio = numerator_volume / denominator_volume)
+  
+  # Create box plot
+  p <- ggplot(seasonal_ratio, aes(x = period, y = ratio, fill = scenario)) +
+    geom_boxplot(
+      position = position_dodge(width = 0.8),
+      alpha = 0.7,
+      outlier.size = 1
+    ) +
+    scale_fill_manual(
+      values = scenario_colors,
+      name = "Scenario"
+    ) +
+    # Add y-axis limits starting at 0
+    scale_y_continuous(
+      limits = c(0, max(seasonal_ratio$ratio) * 1.1),
+      expand = expansion(mult = c(0, 0.05))
+    ) +
+    labs(
+      title = "Discharge Volume Ratio",
+      subtitle = paste("Ratio:", ratio_name),
+      x = "Period",
+      y = "Volume Ratio"
+    ) +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(face = "bold", size = 14),
+      plot.subtitle = element_text(size = 12),
+      axis.title = element_text(face = "bold", size = 12),
+      axis.text = element_text(size = 10),
+      legend.title = element_text(face = "bold", size = 10),
+      legend.text = element_text(size = 9),
+      legend.position = "bottom",
+      panel.grid.minor = element_blank(),
+      panel.border = element_rect(fill = NA, color = "gray80")
+    ) +
+    geom_hline(
+      yintercept = 1,
+      linetype = "dashed",
+      color = "gray50",
+      alpha = 0.7
+    )
+  
+  return(p)
+}
+```
+
+### Summer Discharge Ratio
+```{r}
+# For Q3 to annual ratio
+plot_Q3_ann <- plot_seasonal_discharge_ratio(
+  q_dly_obs_scen_per,
+  scenario_colors_with_obs,
+  numerator_months = c(6,7,8),
+  denominator_months = 1:12,
+  ratio_name = "Summer / Annual"
+)
+plot_Q3_ann
+
+# save figure
+ggsave(file.path(fig_rep,paste0("discharge_ratio_summer_annual.png")), 
+       plot = plot_Q3_ann, 
+       width = 10, height = 6, dpi = 600)
+ggsave(file.path("../06_figures",paste0("discharge_ratio_summer_annual.png")), 
+       plot = plot_Q3_ann, 
+       width = 10, height = 6, dpi = 600)
+```
+
+
+### S1/S2 Discharge Ratio
+```{r}
+# For S1/S2 ratio
+plot_S1_S2_ratio <- plot_seasonal_discharge_ratio(
+  q_dly_obs_scen_per,
+  scenario_colors_with_obs,
+  numerator_months = 1:6,
+  denominator_months = 7:12,
+  ratio_name = "First to Second Semester"
+)
+plot_S1_S2_ratio
+
+# save figure
+ggsave(file.path(fig_rep,paste0("discharge_ratio_s1_s2.png")), 
+       plot = plot_S1_S2_ratio, 
+       width = 10, height = 6, dpi = 600)
+ggsave(file.path("../06_figures",paste0("discharge_ratio_s1_s2.png")), 
+       plot = plot_S1_S2_ratio, 
+       width = 10, height = 6, dpi = 600)
+```
+
+
+### Warm to Cold Season Discharge Ratio 
+```{r}
+# For warm to cold season ratio
+plot_warm_cold_ratio <- plot_seasonal_discharge_ratio(
+  q_dly_obs_scen_per,
+  scenario_colors_with_obs,
+  numerator_months = 4:9,
+  denominator_months = c(1:3,10:12),
+  ratio_name = "Warm to Cold Season"
+)
+plot_warm_cold_ratio
+
+# save figure
+ggsave(file.path(fig_rep,paste0("discharge_ratio_warm_cold.png")), 
+       plot = plot_warm_cold_ratio, 
+       width = 10, height = 6, dpi = 600)
+ggsave(file.path("../06_figures",paste0("discharge_ratio_warm_cold.png")), 
+       plot = plot_warm_cold_ratio, 
+       width = 10, height = 6, dpi = 600)
+```
+
+### Ratio Time Series Plotting Function
+```{r}
+library(dplyr)
+library(ggplot2)
+library(lubridate)
+
+plot_seasonal_discharge_ratio_ts <- function(data, scenario_colors, 
+                                           numerator_months, denominator_months,
+                                           ratio_name = NULL) {
+  if (!all(numerator_months %in% 1:12) || !all(denominator_months %in% 1:12)) {
+    stop("Months must be integers between 1 and 12")
+  }
+  
+  if (is.null(ratio_name)) {
+    ratio_name <- paste(
+      paste(sort(numerator_months), collapse=","),
+      "/",
+      paste(sort(denominator_months), collapse=",")
+    )
+  }
+  
+  # Calculate yearly ratios
+  seasonal_ratio <- data %>%
+    mutate(
+      month = month(date),
+      year = year(date)
+    ) %>%
+    group_by(year, scenario) %>%
+    summarise(
+      numerator_volume = sum(Q_mm_day[month %in% numerator_months]),
+      denominator_volume = sum(Q_mm_day[month %in% denominator_months]),
+      .groups = "drop"
+    ) %>%
+    mutate(ratio = numerator_volume / denominator_volume)
+  
+  # Create time series plot
+  p <- ggplot(seasonal_ratio, aes(x = year, y = ratio, color = scenario)) +
+    # Add lines
+    geom_line(linewidth = 0.8) +
+    # Add points
+    geom_point(size = 1.5) +
+    # Customize colors
+    scale_color_manual(
+      values = scenario_colors,
+      name = "Scenario"
+    ) +
+    # Set axis scales
+    scale_y_continuous(
+      limits = c(0, max(seasonal_ratio$ratio) * 1.1),
+      expand = expansion(mult = c(0, 0.05))
+    ) +
+    scale_x_continuous(
+      breaks = seq(2000, 2100, by = 10),
+      limits = c(2000, 2099)
+    ) +
+    # Add labels
+    labs(
+      title = "Discharge Volume Ratio Over Time",
+      subtitle = paste("Ratio:", ratio_name),
+      x = "Year",
+      y = "Volume Ratio"
+    ) +
+    # Customize theme
+    theme_minimal() +
+    theme(
+      plot.title = element_text(face = "bold", size = 14),
+      plot.subtitle = element_text(size = 12),
+      axis.title = element_text(face = "bold", size = 12),
+      axis.text = element_text(size = 10),
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      legend.title = element_text(face = "bold", size = 10),
+      legend.text = element_text(size = 9),
+      legend.position = "bottom",
+      panel.grid.minor = element_blank(),
+      panel.border = element_rect(fill = NA, color = "gray80")
+    ) +
+    # Add reference line
+    geom_hline(
+      yintercept = 1,
+      linetype = "dashed",
+      color = "gray50",
+      alpha = 0.7
+    )
+  
+  return(p)
+}
+```
+
+### Summer Discharge Ratio Time Series
+```{r}
+# Example usage for Q3 to annual ratio
+plot_summer_annual_ts <- plot_seasonal_discharge_ratio_ts(
+  q_dly_obs_scen_per,
+  scenario_colors_with_obs,
+  numerator_months = c(6,7,8),
+  denominator_months = 1:12,
+  ratio_name = "Summer / Annual"
+)
+print(plot_summer_annual_ts)
+
+# save figure
+ggsave(file.path(fig_rep,paste0("discharge_ratio_ts_summer_annual.png")), 
+       plot = plot_summer_annual_ts, 
+       width = 10, height = 6, dpi = 600)
+ggsave(file.path("../06_figures",paste0("discharge_ratio_ts_summer_annual.png")), 
+       plot = plot_summer_annual_ts, 
+       width = 10, height = 6, dpi = 600)
+```
+
+### S1/S2 Discharge Ratio Series
+```{r}
+# For S1/S2 ratio
+plot_S1_S2_ratio_ts <- plot_seasonal_discharge_ratio_ts(
+  q_dly_obs_scen_per,
+  scenario_colors_with_obs,
+  numerator_months = 1:6,
+  denominator_months = 7:12,
+  ratio_name = "First to Second Semester"
+)
+plot_S1_S2_ratio_ts
+
+# save figure
+ggsave(file.path(fig_rep,paste0("discharge_ratio_ts_s1_s2.png")), 
+       plot = plot_S1_S2_ratio_ts, 
+       width = 10, height = 6, dpi = 600)
+ggsave(file.path("../06_figures",paste0("discharge_ratio_ts_s1_s2.png")), 
+       plot = plot_S1_S2_ratio_ts, 
+       width = 10, height = 6, dpi = 600)
+```
+
+### Warm to Cold Season Discharge Ratio Time Series
+```{r}
+# For warm to cold season ratio
+plot_warm_cold_ratio_ts <- plot_seasonal_discharge_ratio_ts(
+  q_dly_obs_scen_per,
+  scenario_colors_with_obs,
+  numerator_months = 4:9,
+  denominator_months = c(1:3,10:12),
+  ratio_name = "Warm to Cold Season"
+)
+plot_warm_cold_ratio_ts
+
+# save figure
+ggsave(file.path(fig_rep,paste0("discharge_ratio_ts_warm_cold.png")), 
+       plot = plot_warm_cold_ratio_ts, 
+       width = 10, height = 6, dpi = 600)
+ggsave(file.path("../06_figures",paste0("discharge_ratio_ts_warm_cold.png")), 
+       plot = plot_warm_cold_ratio_ts, 
+       width = 10, height = 6, dpi = 600)
+```
+
+## 6.4 Development of Flow Characteristics
+
+In this Section, we want to make to study changes in flow duration curves (FDCs) and how these change over time and depending on the climate scenario and the target period. 
+
+A flow duration curve (FDC) is a plot of the flow duration (in terms of exceedance probability) against the flow rate. The FDC is a useful tool for understanding the flow characteristics of a river and is often used in hydrology to assess the flow regime of a river. It shows the relationship between the flow rate and the probability of that flow rate being exceeded.
+
+```{r}
+# First, compute discharge volume per second Q_m3_sec
+q_dly_obs_scen_per <- q_dly_obs_scen_per |> 
+    mutate(Q_m3_sec = Q_mm_day * as.numeric(Basin_Info$BasinArea_m2) / 1000 / 24 / 3600)  # Convert to m3/s
+
+# Second, calculate exceedance for each scenario and period
+exceedance_data <- q_dly_obs_scen_per %>%
+  group_by(scenario, period) %>%
+  nest() %>%
+  mutate(data = map(data, calculate_exceedance)) %>%
+  unnest(cols = c(data))
+
+ec_ssp126 <- plot_exceedance(exceedance_data, "ssp126", "Scenario SSP1-2.6")
+ec_ssp245 <- plot_exceedance(exceedance_data, "ssp245", "Scenario SSP2-4.5")
+ec_ssp360 <- plot_exceedance(exceedance_data, "ssp370", "Scenario SSP3-7.0")
+ec_ssp585 <- plot_exceedance(exceedance_data, "ssp585", "Scenario SSP5-8.5")
+
+# plot facets
+exceedance_results_plot <- (ec_ssp126 + ec_ssp245) / (ec_ssp360 + ec_ssp585)
+
+plot_size = 9
+
+# save figure
+ggsave(file.path(config$paths$figures_path,"exceedance_results_plot.pdf"), 
+       plot = exceedance_results_plot, 
+       width = plot_size, height = plot_size)
+
+# plot on screen
+exceedance_results_plot
+```
+
+# X. EXPERIMENTS
+
+There are a few experiments that we can conduct to further improve the model performance. For example, in the computation of the fraction of solid precipitation on the layer, we can calibrate the USACE_Tmin and USACE_Tmax parameters, i.e. the range of the transition temperatures from solid to liquid precipitation.
+
+## X.0 Compute Glazirin Threshold Temperatures for Elevation Bands
+
+This was provided by Andrey. The resulting temperatures are threshold temperatures. > liquid and < solid.
+```{r}
+z_km <- Basin_Info$ZLayers / 1000
+
+deltaT <- 10
+
+Basin_Info$ThresholdTemp <- (1.25 + 0.016 * z_km + 0.207 * z_km^2) - deltaT
+#Basin_Info$ThresholdTemp
+
+# plot threshold temp versus ZLayers in a nice ggplot. For this, we cast ZLayers and Threshold Temp into a data frame
+df <- data.frame(ZLayers = Basin_Info$ZLayers, ThresholdTemp = Basin_Info$ThresholdTemp)
+
+ggplot(data = df, aes(x = ZLayers, y = ThresholdTemp)) +
+  geom_point() +
+  geom_line() +
+  labs(x = "Elevation [masl]", y = "Threshold Temperature [°C]") +
+  ggtitle("Threshold Temperature vs Elevation, Gleb Glazirin Method") +
+  theme_minimal()
+```
+
+
+## X.1 Calibration of sold/liquid preciptation parameters of USACE method
+
+According to the airGR documentation, the USACE method is used to compute the fraction of solid precipitation on the layer. The method requires two parameters: USACE_Tmin and USACE_Tmax. These parameters are used to compute the fraction of solid precipitation on the layer. The source is: USACE (1956), Snow Hydrology, pp. 437. U.S. Army Corps of Engineers (USACE) North Pacific Division, Portland, Oregon, USA.
+
+We use this approach to perturbe elevation specific values. We generate realizations of these parameters using Latin-Hypercube Sampling and then subtract or add these sampled values to the threshold temperatures to arrive at the USACE_Tmin and USACE_Tmax thresholds.
+
+Let us conduct an experiment to calibrate these parameters. 
+
+### Latin-Hypercube Sampling
+```{r}
+# First install and load the package if you haven't already
+# install.packages("lhs")
+p_load(lhs)
+
+# Set the number of samples you want
+n_samples <- 400  # adjust this number according to needs
+
+# Generate normalized LHS (values between 0 and 1)
+set.seed(111)  # for reproducibility
+lhs_design <- randomLHS(n = n_samples, k = 2)
+
+# Scale the values to your ranges:
+# tas_min variations from Glazirin
+Tmin_min <- -10 # -10
+T_min_max <- 10 # 2
+# USACE_Tmax: from -1 to 5
+Tmax_min <- -10 # -1
+T_max_max <- 10 # 5
+# generate samples
+samples <- data.frame(
+  USACE_Tmin = lhs_design[,1] * (T_min_max - (Tmin_min)) + (Tmin_min),  # scale to [-10, 2]
+  USACE_Tmax = lhs_design[,2] * (T_max_max - (Tmax_min)) + (Tmax_min)     # scale to [-1, 5]
+)
+
+# ensure that Tmax is > Tmin
+samples <- samples |> 
+  filter(USACE_Tmax > USACE_Tmin)
+
+# View first few samples
+head(samples)
+
+# You can plot to visualize the distribution
+plot(samples$USACE_Tmin, samples$USACE_Tmax,
+     xlab = "USACE_Tmin", ylab = "USACE_Tmax",
+     main = "Latin Hypercube Samples")
+```
+
+
+### Run Model for Each Sample
+
+Note, this version of the code below is not parallelzied.
+
+```{r}
+#| warning: false
+
+# run preparation
+# model to use
+fun_model <- RunModel_CemaNeigeGR4J
+performance_crit <- list()
+
+# loop over the samples
+
+tictoc::tic()
+for (idx in seq(1,nrow(samples))) {
+  # print run number
+  print(paste0("Run number: ", idx))
+  # compute the fraction of solid precipitation on the layer
+  solid_frac_pr <- solid_fraction_elevation_layer(Basin_Info, #dates,
+                                                  tas = inputsModel_ours$LayerTempMean, 
+                                                  tas_min = samples$USACE_Tmin[idx], 
+                                                  tas_max = samples$USACE_Tmax[idx]) 
+  
+  inputsModel_ours$LayerFracSolidPrecip <- solid_frac_pr
+  # overwrite original
+  inputsModel <- inputsModel_ours
+  
+  # What we are doing here is to overwrite the setup prepared in the airGR::CreateInputsModel() script. In otherw rods, we just use the data from the data_preparation script.
+  
+  runOptions_cal <- airGR::CreateRunOptions(FUN_MOD          = fun_model,
+                                            InputsModel      = inputsModel,
+                                            IndPeriod_Run    = indRun_cal,
+                                            IniStates        = NULL,
+                                            IniResLevels     = NULL,
+                                            IndPeriod_WarmUp = warmup_period_ind,
+                                            IsHyst = FALSE,
+                                            warnings = FALSE)
+  
+  inputsCrit_cal <- airGR::CreateInputsCrit(FUN_CRIT    = airGR::ErrorCrit_NSE,
+                                            InputsModel = inputsModel,
+                                            RunOptions  = runOptions_cal,
+                                            transfo = "boxcox",
+                                            Obs         = basin_obs_ts$Q_mm_day_no_glacier[indRun_cal],
+                                            warnings = FALSE)
+  
+  calibOptions <- airGR::CreateCalibOptions(FUN_MOD = fun_model, 
+                                            FUN_CALIB = airGR::Calibration_Michel)
+  
+  # calibrate and keep NSE result
+  outputsCalib <- airGR::Calibration_Michel(InputsModel = inputsModel,
+                                   RunOptions = runOptions_cal,
+                                   InputsCrit = inputsCrit_cal,
+                                   CalibOptions = calibOptions,
+                                   FUN_MOD = fun_model)
+  
+  performance_crit[[idx]] <- outputsCalib$CritFinal
+}
+tic_toc <- tictoc::toc()
+
+```
+
+### Parallel Run
+```{r}
+# Load required packages
+p_load(foreach)
+p_load(doParallel)
+
+# Set up parallel backend
+# Detect number of CPU cores and leave one free for system processes
+n_cores <- parallel::detectCores() - 1
+# Create and register parallel cluster
+cl <- makeCluster(n_cores)
+registerDoParallel(cl)
+
+# Start timing
+tictoc::tic()
+
+# Parallel execution using foreach
+performance_crit <- foreach(idx = 1:nrow(samples),
+                          .packages = c("airGR"),  # Add any other required packages
+                          .errorhandling = "pass") %dopar% {
+  
+  # Print run number (note: in parallel execution, prints might be out of order)
+  cat(sprintf("Run number: %d\n", idx))
+  
+  # Compute the fraction of solid precipitation on the layer
+  solid_frac_pr <- solid_fraction_elevation_layer(Basin_Info,
+                                                  inputsModel_ours$LayerTempMean, 
+                                                  tas_min = samples$USACE_Tmin[idx], 
+                                                  tas_max = samples$USACE_Tmax[idx]) 
+  
+  # Create local copy of inputsModel_ours and modify it
+  inputsModel <- inputsModel_ours
+  inputsModel$LayerFracSolidPrecip <- solid_frac_pr
+  
+  # Create run options
+  runOptions_cal <- airGR::CreateRunOptions(
+    FUN_MOD = fun_model,
+    InputsModel = inputsModel,
+    IndPeriod_Run = indRun_cal,
+    IniStates = NULL,
+    IniResLevels = NULL,
+    IndPeriod_WarmUp = warmup_period_ind,
+    IsHyst = FALSE,
+    warnings = FALSE
+  )
+  
+  # Create input criteria
+  inputsCrit_cal <- airGR::CreateInputsCrit(
+    FUN_CRIT = airGR::ErrorCrit_NSE,
+    InputsModel = inputsModel,
+    RunOptions = runOptions_cal,
+    #transfo = "boxcox",
+    Obs = basin_obs_ts$Q_mm_day_no_glacier[indRun_cal],
+    warnings = FALSE
+  )
+  
+  # Create calibration options
+  calibOptions <- airGR::CreateCalibOptions(
+    FUN_MOD = fun_model, 
+    FUN_CALIB = Calibration_Michel
+  )
+  
+  # Calibrate and return NSE result
+  outputsCalib <- Calibration_Michel(
+    InputsModel = inputsModel,
+    RunOptions = runOptions_cal,
+    InputsCrit = inputsCrit_cal,
+    CalibOptions = calibOptions,
+    FUN_MOD = fun_model
+  )
+  
+  # Return the criterion value
+  outputsCalib$CritFinal
+}
+
+# Stop timing
+time_taken <- tictoc::toc()
+
+# Stop cluster
+stopCluster(cl)
+
+# Convert results to a list if they aren't already
+performance_crit <- as.list(performance_crit)
+```
+
+### Visualize Sampling Results
+```{r}
+#| warning: false
+
+performance_crit_tbl <- tibble(Tmin = samples$USACE_Tmin,
+                               Tmax = samples$USACE_Tmax, 
+                               NSE = unlist(performance_crit))
+
+# Create the ggplot first
+p <- performance_crit_tbl |>
+  ggplot(aes(x = Tmin, y = Tmax, color = NSE)) +
+  geom_point(size = 3) +
+  scale_color_viridis_c() +  # Note: changed from scale_fill_viridis()
+  labs(x = "USACE_Tmin", y = "USACE_Tmax", color = "NSE") +
+  theme_minimal()
+
+# Convert to interactive plot
+plotly::ggplotly(p)
+```
+
+### Calibrate Model with Best Snow / Rain Transition Dataset
+```{r}
+# Get the best performing parameter set
+best_params <- performance_crit_tbl |> 
+  filter(NSE == max(NSE)) |> 
+  dplyr::select(Tmin, Tmax)
+
+# recompute the fraction of solid precipitation on the layer
+solid_frac_pr <- solid_fraction_elevation_layer(Basin_Info, 
+                                                  inputsModel_ours$LayerTempMean, 
+                                                  tas_min = best_params$Tmin, 
+                                                  tas_max = best_params$Tmax) 
+
+inputsModel_ours$LayerFracSolidPrecip <- solid_frac_pr
+
+# overwrite original
+inputsModel <- inputsModel_ours
+
+runOptions_cal <- airGR::CreateRunOptions(FUN_MOD          = fun_model,
+                                          InputsModel      = inputsModel,
+                                          IndPeriod_Run    = indRun_cal,
+                                          IniStates        = NULL,
+                                          IniResLevels     = NULL,
+                                          IndPeriod_WarmUp = warmup_period_ind,
+                                          IsHyst           = FALSE,
+                                          warnings         = FALSE)
+
+inputsCrit_cal <- airGR::CreateInputsCrit(FUN_CRIT         = fun_crit,
+                                          InputsModel      = inputsModel,
+                                          RunOptions       = runOptions_cal,
+                                          transfo          = transfo,
+                                          Obs              = q_obs_cal,
+                                          warnings         = FALSE)
+
+calibOptions <- airGR::CreateCalibOptions(FUN_MOD = fun_model, 
+                                          FUN_CALIB = Calibration_Michel)
+
+# calibrate and keep NSE result
+outputsCalib <- Calibration_Michel(InputsModel = inputsModel,
+                                   RunOptions = runOptions_cal,
+                                   InputsCrit = inputsCrit_cal,
+                                   CalibOptions = calibOptions,
+                                   FUN_MOD = fun_model)
+
+param <- outputsCalib$ParamFinalR
+
+# switch call of function depending on fun_model
+if (model_2_use == "GR4J") {
+  runResults_cal <- RunModel_CemaNeigeGR4J(InputsModel = inputsModel,
+                                           RunOptions = runOptions_cal,
+                                           Param = param)
+} else if (model_2_use == "GR5J") {
+  runResults_cal <- RunModel_CemaNeigeGR5J(InputsModel = inputsModel,
+                                           RunOptions = runOptions_cal,
+                                           Param = param)
+} else if (model_2_use == "GR6J") {
+  runResults_cal <- RunModel_CemaNeigeGR6J(InputsModel = inputsModel,
+                                           RunOptions = runOptions_cal,
+                                           Param = param)
+}
+#runResults_cal <- RunModel_CemaNeigeGR6J(InputsModel = inputsModel,
+#                                         RunOptions = runOptions_cal,
+#                                         Param = param)
+
+plot(runResults_cal, Qobs = basin_obs_ts$Q_mm_day[indRun_cal])
+
+OutputsCrit <- ErrorCrit_NSE(InputsCrit = inputsCrit_cal, OutputsModel = runResults_cal)
+OutputsCrit
+```
+
+### Validation Run
+```{r}
+runOptions_val <- airGR::CreateRunOptions(FUN_MOD          = fun_model,
+                                          InputsModel      = inputsModel,
+                                          IndPeriod_Run    = indRun_val,
+                                          IniStates        = runResults_cal$StateEnd,
+                                          IniResLevels     = NULL)
+
+inputsCrit_val <- airGR::CreateInputsCrit(FUN_CRIT         = fun_crit,
+                                          InputsModel      = inputsModel,
+                                          RunOptions       = runOptions_val,
+                                          transfo          = transfo,
+                                          Obs              = q_obs_val,
+                                          Weights          = weights)
+
+# switch call of function depending on fun_model
+if (model_2_use == "GR4J") {
+  runResults_val <- RunModel_CemaNeigeGR4J(InputsModel     = inputsModel,
+                                           RunOptions      = runOptions_val,
+                                           Param           = param)
+} else if (model_2_use == "GR5J") {
+  runResults_val <- RunModel_CemaNeigeGR5J(InputsModel     = inputsModel,
+                                           RunOptions      = runOptions_val,
+                                           Param           = param)
+} else if (model_2_use == "GR6J") {
+  runResults_val <- RunModel_CemaNeigeGR6J(InputsModel     = inputsModel,
+                                           RunOptions      = runOptions_val,
+                                           Param           = param)
+}
+
+plot(runResults_val, Qobs = basin_obs_ts$Q_mm_day[indRun_val])
+
+OutputsCrit <- ErrorCrit_NSE(InputsCrit = inputsCrit_val, OutputsModel = runResults_val)
+OutputsCrit
+                                          
+```
+
+## X.2 Results Investigation (work in progress)
+
+### CemaNeige Layer Preciptitation
+```{r}
+
+```
+
+# SCRATCH
+
+```{r}
+# Function to test model sensitivity to temperature offsets
+test_temperature_sensitivity <- function(inputsModel, runOptions_cal, base_temp, offset_values) {
+  results <- list()
+  
+  for(offset in offset_values) {
+    # Create a copy of the inputs model
+    test_inputs <- inputsModel
+    
+    # Apply temperature offset to all elevation layers
+    for(i in 1:length(test_inputs$LayerTempMean)) {
+      test_inputs$LayerTempMean[[i]] <- base_temp + offset
+    }
+    
+    # Run the model
+    test_run <- RunModel_CemaNeigeGR4J(
+      InputsModel = test_inputs,
+      RunOptions = runOptions_cal,
+      Param = c(X1 = 400.0, # production store capacity (mm)
+                X2 = 0.0,   # groundwater exchange coefficient (mm/d)
+                X3 = 60.0,  # routing store capacity (mm)
+                X4 = 1.7,   # unit hydrograph time constant (d)
+                CNX1 = 0.7, # weighting for snow pack thermal state
+                CNX2 = 2.0) # degree-day melt coefficient (mm/°C/d)
+    )
+    
+    # Store results
+    results[[as.character(offset)]] <- list(
+      offset = offset,
+      mean_discharge = mean(test_run$Qsim, na.rm = TRUE),
+      max_discharge = max(test_run$Qsim, na.rm = TRUE),
+      snow_store = colMeans(test_run$CemaNeigeLayers$SnowPack, na.rm = TRUE)
+    )
+  }
+  
+  return(results)
+}
+
+# Test with different temperature offsets
+offsets <- c(-100, -50, -10, 0, 10, 50, 100)
+sensitivity_results <- test_temperature_sensitivity(
+  inputsModel = inputsModel,
+  runOptions_cal = runOptions_cal,
+  base_temp = basin_obs_ts$Temp,
+  offset_values = offsets
+)
+
+# Create summary dataframe
+results_df <- do.call(rbind, lapply(sensitivity_results, function(x) {
+  data.frame(
+    offset = x$offset,
+    mean_discharge = x$mean_discharge,
+    max_discharge = x$max_discharge,
+    mean_snow_store = mean(x$snow_store)
+  )
+}))
+
+# Plot results
+library(ggplot2)
+
+p1 <- ggplot(results_df, aes(x = offset)) +
+  geom_line(aes(y = mean_discharge), color = "blue") +
+  geom_point(aes(y = mean_discharge), color = "blue") +
+  labs(x = "Temperature Offset (°C)", 
+       y = "Mean Discharge (mm/day)",
+       title = "Impact of Temperature Offset on Mean Discharge") +
+  theme_minimal()
+
+p2 <- ggplot(results_df, aes(x = offset)) +
+  geom_line(aes(y = mean_snow_store), color = "red") +
+  geom_point(aes(y = mean_snow_store), color = "red") +
+  labs(x = "Temperature Offset (°C)", 
+       y = "Mean Snow Store (mm)",
+       title = "Impact of Temperature Offset on Snow Storage") +
+  theme_minimal()
+
+# Print results
+print(results_df)
+```
+
+
+
+
+
+
+

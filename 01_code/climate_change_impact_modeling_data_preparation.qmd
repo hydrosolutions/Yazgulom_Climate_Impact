@@ -1,0 +1,2547 @@
+---
+title: "Climate Change Impact Modeling in Yazgulom River Basin: Preparation of Model Data"
+author: "Tobias Siegfried, hydrosolutions GmbH"
+format: html
+editor: source
+date: "2025-05-2"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+
+This R Quarto document details the process of preparing model data for climate change impact modeling in the Yazgulom River basin. The script is designed to process climate data, perform necessary transformations, and generate inputs for hydrological modeling. This work is crucial for understanding potential future changes in water resources within the basin under various climate scenarios.
+
+We only have monthly data available for the Yazgulom River basin. The script is structured to handle the specific requirements of this dataset:
+- hydro model calibration as in the Suek River case study
+- climate impact study as in the Vaksh River basin
+
+# Change Log
+
+This section documents the evolution of the script, highlighting key updates and improvements:
+
+- **2024-02-08**: Initial version created, adapting the original code from the Taloqan River basin study. The script reverts to using CHELSA climate data instead of NSIDC data.
+- **2024-02-10**: Continued development to produce a workable script for Adrian.
+- **2024-02-11**: Implemented new download option for CHELSA V21 data from WSL servers, significantly improving data acquisition. Major script reorganization and validation of sections up to Section 4. Sections 5 (Bias Correction) and 6 await further refinement.
+- **2024-02-12**: Fixed a bug in the discharge data concatenation process.
+- **2024-02-17**: Established as the working version to serve as a base for the handbook.
+- **2024-05-13**: Added glacier-related components to the analysis.
+- **2024-06-20**: 
+  - Resolved IPSL error and improved overall script consistency.
+  - Enhanced BCSD (Bias Correction Spatial Disaggregation) methodology, now correctly applied to IPSL data.
+  - Implemented numerous improvements and beautification of code.
+  - Added analysis of modeling results (available in the corresponding script `zrb_climate_impact_analysis.qmd` within the R project `model_zarafshan_tobi`).
+- **2024-06-21**: Identified significant issues with the previously calibrated model.
+- **2024-06-23**: Strategized on model improvement:
+  - Considered recalibration or switching to Bea's best 10-layer model.
+  - Noted challenges with changing models mid-teaching (Adrian and Aidar using 9-layer model).
+- **2024-06-24**: Began test runs using Beatrice's model for climate change impact modeling predictions, due to unsatisfactory results with the 9-layer model.
+- **2024-06-25**:
+  - Reran entire database creation to address coordinate inconsistencies, now consistently using `hru_utm`.
+  - Integrated decadal discharge data into the database.
+  - Added a cross-check quality control section.
+- **2024-06-26**: 
+  - Major update: Replaced future IPSL-CM6A-LR projections due to incorrect precipitation fields.
+  - Updated precipitation fields in corresponding FUT-SIM folder and Documents/ca_large_files/.
+- **2024-06-27**: Introduced option for precipitation rescaling of historical observation data.
+- **2024-07-07 to 2024-07-14**: Continued refinement of precipitation forcing rescaling methodology.
+- **2024-07-17**: Added glacier processing section, completing all processing sections for a comprehensive workflow script.
+- **2024-08-08**: 
+  - Computed BCSD files with rescaled precipitation for historical observations.
+  - Ran hydrological model and produced output results for analysis.
+  - Enhanced `plot_forcing_data` function to display figures in a four-panel layout.
+- **2024-08-09**: Reorganized file output writing for better organization of climate forcing data.
+- **2024-08-12**: 
+  - Added expert FOF PNG file for integrating figures in Windows Word.
+  - Planned to streamline code by sourcing functions to reduce duplication.
+  - Improved climate scenarios palette for enhanced figure visualization.
+- **2024-08-13**: 
+  - Enhanced glacier processing methodology.
+  - Recomputed RS Minerve simulations to include glacier melt in future projections.
+- **2024-09-30**: Adapted script for Vaksh basin, incorporating improvements from the intermediate Suek River basin study.
+- **2024-10-04**: 
+  - CHELSA V21 pr data only available until and including 2019 currently for download. Dirk Karger will inform, when the new data is available post 2000.
+  - Lapse rates are currently not available for Vaksh to validate CHELSA V21 preciptiation data. Let us see if Andrey can get this data.
+  - Various smaller improvements and code streamlining.
+- **2024-10-05**: 
+  - Further code improvements and streamlining. The goal was to make it more general that we can apply our approach to any basin without having to change variable names and directory paths. Looks like we are good now.
+  - The future philosophy is to only refer to the basin name in the parent folder and to create and store the R project at this level (and not in the code folder). This makes the lower level folder structure more general and easier to maintain. It also eases the pain of replication to the next river. The resulting directory structure is shown below...
+  - Added section 1.5 for precipitation data import and visualization for them in section 5.4: Precipitation data comparison
+
+XYZ_river_modeling_story/
+│
+├── XYZ_river_modeling_study.R.proj
+├── 01_code
+├── 02_data
+├── 03_materials
+├── 04_report-see_oneDrive
+└── 05_models
+    └─ forcing
+    
+- **2024-11-18**:
+  - Code review by @Tobi. Changed glacier preparation data to ensure that our hist_obs period is now correctly from 2000 through 2019. The fut_sim period can then start in 2020. This is a deviation from usual per period assessments but is necessary due to the data availability in the case of Vaksh.
+  - Introduce factors for hru plotting just to make the legend nice looking.
+- **2024-11-19**:
+  - Correcting fut_sim data preparation issues.
+- **2024-11-20**
+  - Setup and export basin info, including the basin area, basin code, basin name, and hypsometric curve data. This will be read into the hydro_model_airGR. qmd script.
+  - More preparation towards full integration of airGR workflow in the climate assessment/impact chain.
+  - Need to check Hypso data since I believe something is wrong.
+- **2024-11-21**:
+  - Code review by @Aidar. Changed "Hydrological Modeling" chapter location from before "GIS Data" to after "GIS Data", because "Hydrological Modeling" uses some directories that were defined in "GIS Data:.
+  - Store glacier melt data for the calibration and validation period for importing and processing in the hydro modeling script.
+  - Need to validate the hypsometric curve implementation since we get very small elevation values in the curve. What could be wrong?
+- **2024-11-25**:
+  - Add elevation band data layer height to Basin_Info$ZLayers list so that we can retrieve this information in the hydro_model_airGR.qmd script.
+- **2024-11-28**:
+  - Further streamlining the code and harmoniziation between the scripts. 
+  - Now sourcing the functions to provide them as context to LLMs.
+- **2024-11-30**:
+  - Greatly improved and polished plotting of figures.
+- **2024-12-03**:
+  - Figures of Lapse Rates need to be improved.
+- **2024-12-18**:
+  - Glacier volume calculation using Erasov method added
+- **2025-02-18**:
+  - Preparing for sharing the code with the team.
+- **2025-02-27**:
+  - Small edits and changes.
+- **2025-03-02**:
+  - Small edits to reflect changes in the .ipynb file.
+  - Also installed Quarto in the conda `myrrun` environment for further testing qmd-files with VSCode.
+- **2025-03-03**:
+  - Added a parameter configuration file to the code folder and the corresponding configuration loading.
+- **2025-03-04**:
+  - Corrected newly introduced error in Section 3 GLACIERS DATA
+  - Made numerous beautification changes. It's slowly getting presentable.
+- **2025-03-05**:
+  - Another round of essential code streamlining and optimization.
+# ==========
+- **2025-03-05**:
+  - Adaptation of script to Atbashy catchment
+- **2025-04-25**:
+  - Further tweaking of script and making sure that model calibration with monthly data works.
+- **2025-04-27**:
+  - Further improvements and polishing of the script.
+- **2025-04-28**:
+  - Many changes and adaptations to run a future ERA5 scenario only.
+  - Script is working well now and is ready for the next steps.
+# ==========
+- **2025-05-01**:
+  - Spin off to Yazgulom River basin. Here, we use the Atbashy 2025 modeling approach for calibration and the Vaksh case for the impact study.
+
+# CONFIGURATIONS
+
+This section loads a centralized configuration file and sets up key variables for the analysis. The configuration includes parameters for river/basin identification, file paths, time periods, climate models and scenarios, GIS parameters, elevation band parameters, visualization palettes, and processing options. This structured approach makes the code more maintainable and adaptable to different river basins.
+
+```{r}
+# Load the centralized configuration
+library(pacman)
+p_load(here, tidyverse, lubridate)
+
+path = here::here("01_code", "config_param.R")
+source(path)
+
+# Access configuration parameters through the config structure:
+# - config$project: River and basin identification
+# - config$paths: Data directory locations
+# - config$periods: Time periods for analysis
+# - config$climate: Climate models and scenarios
+# - config$gis: GIS parameters and file paths
+# - config$hru: Elevation band parameters
+# - config$colors: Color palettes for visualization
+# - config$options: Processing options and thresholds
+
+# For backward compatibility with existing code, define key variables
+# from the configuration
+river_name <- config$project$river_name
+basin_name <- config$project$basin_name
+gauge_code <- config$project$gauge_code
+gauge_name <- config$project$gauge_name
+
+# Path configuration
+data_path <- config$paths$data_path
+gis_path <- config$paths$gis_path
+hist_obs_dir <- config$paths$hist_obs_dir
+hist_sim_dir <- config$paths$hist_sim_dir
+fut_sim_dir <- config$paths$fut_sim_dir
+model_dir <- config$paths$model_dir
+glacier_path <- config$paths$glacier_path
+fig_rep <- config$paths$figures_path
+
+# Time periods
+hist_obs_start <- config$periods$hist_obs_start
+hist_obs_end <- config$periods$hist_obs_end
+hist_sim_start <- config$periods$hist_sim_start
+hist_sim_end <- config$periods$hist_sim_end
+fut_sim_start <- config$periods$fut_sim_start
+fut_sim_end <- config$periods$fut_sim_end
+calib_start <- as.Date(config$periods$calib_start)
+calib_end <- as.Date(config$periods$calib_end)
+valid_start <- as.Date(config$periods$valid_start)
+valid_end <- as.Date(config$periods$valid_end)
+
+# Climate models and scenarios
+gcm_Models <- config$climate$models
+hist_sim_models <- config$climate$hist_sim_models
+fut_sim_models <- config$climate$fut_sim_models
+gcm_Scenarios <- config$climate$scenarios
+gcm_Models_Scenarios <- config$climate$model_scenarios
+hydrology_run_scenarios <- config$climate$hydrology_run_scenarios
+hydrology_run_Models_Scenarios <- config$climate$hydrology_run_model_scenarios
+obs_freq <- config$climate$obs_freq
+
+# Generated date sequences
+hist_obs_dates <- config$dates$hist_obs_dates
+hist_sim_dates <- config$dates$hist_sim_dates
+fut_sim_dates <- config$dates$fut_sim_dates
+
+# GIS parameters
+utm42n <- config$gis$utm42n
+crs_project <- config$gis$crs_project
+basin_shape_file <- config$gis$basin_shape_file
+gauge_shape_file <- config$gis$gauge_shape_file
+
+# Elevation band parameters
+dh_elband <- config$hru$dh_elband
+
+# Visualization palettes
+pastel_palette <- config$colors$scenario_palette
+elevation_colors <- config$colors$elevation_colors
+atbashy_colors <- config$colors$atbashy_colors
+
+# Processing options
+rescale_pr <- config$options$rescale_pr
+streams_threshold <- config$options$streams_threshold
+hydro_model_time_steps <- config$options$hydro_model_time_steps
+sec_month <- config$options$sec_month
+```
+
+# FUNCTIONS
+
+The document sources numerous functions from external files, making them available in the current environment. These functions handle various aspects of the workflow including plotting, data processing, hydrological calculations, and specialized operations for Central Asian rivers.
+
+```{r}
+# Load the here package
+p_load(here)
+
+# Standard packages
+source(here::here("01_code", "functions", "plot_summary_stats.R"))
+source(here::here("01_code", "functions", "plot_dev_norm.R"))
+source(here::here("01_code", "functions", "extract_year.R"))
+source(here::here("01_code", "functions", "post_process_hru.R"))
+source(here::here("01_code", "functions", "process_rsm_data.R"))
+source(here::here("01_code", "functions", "plot_forcing_data.R"))
+source(here::here("01_code", "functions", "process_glacier_runoff.R"))
+source(here::here("01_code", "functions", "prepare_glacier_data_mean_annual_runoff.R"))
+source(here::here("01_code", "functions", "calculate_hypsometric_curve.R"))
+source(here::here("01_code", "functions", "calculate_total_glacier_volume.R"))
+source(here::here("01_code", "functions", "create_enhanced_subseries_plot.R"))
+source(here::here("01_code", "functions", "plot_seasonal_diagnostics.R"))
+source(here::here("01_code", "functions", "plot_discharge_timeseries.R"))
+
+# Below are better versions of the relevant riversCentralAsia package functions
+source(here::here("01_code", "functions", "generateSeqDates.R"))
+source(here::here("01_code", "functions", "decadeMaker.R"))
+source(here::here("01_code", "functions", "monDateSeq.R"))
+source(here::here("01_code", "functions", "loadTabularData.R"))
+source(here::here("01_code", "functions", "glacierVolume_Erasov.R"))
+source(here::here("01_code", "functions", "posixct2rsminerveChar.R"))
+source(here::here("01_code", "functions", "gen_HRU_Climate_CSV_RSMinerve_local.R"))
+```
+
+# 1 DATA
+
+This major section handles data loading and processing across multiple domains:
+
+- Discharge data from gauge 16076, Atschikomandi in Atbashy River
+- GIS data including basin shapefiles, digital elevation models, and hypsometric curves
+- In-situ precipitation data from various stations
+- Glacier outlines from the Randolph Glacier Inventory v6.0
+- Data export for hydrological modeling parameters
+- Basin overview visualization with detailed topographical representation
+
+## 1.1 Discharge
+
+We work with data from the Gauge 16076 Atbashy Atschikomandi We have only monthly datasets.
+
+```{r station_details}
+#| message: false
+#| warning: false
+
+# Gauges
+# Currently, we only work with the 17084 Gauge (Darband, Vaksh)
+
+# Monthly data (Tabular data)
+q_mon <- loadTabularData(fPath = here::here("02_data", "Discharge"), 
+                         fName = paste0(gauge_code,"_Q.csv"), 
+                         code = gauge_code, 
+                         stationName = gauge_name, 
+                         rName = river_name, 
+                         rBasin = basin_name, 
+                         unit = "m3/s", 
+                         dataType = "Q")
+
+q_mon |> head()
+
+q_mon |> tail()
+```
+
+## 1.2 GIS Data
+
+### Raster and Shape Files
+```{r}
+#| message: false
+#| warning: false
+
+# Packages
+p_load(sf, terra, elevatr)
+
+# GIS 
+#Important naming convention. We assume that GIS-files adhere to the following naming convention:
+#- Basin Shapefile: paste0(gauge_code,"_Basin.shp")
+#- River Shapefile: paste0(gauge_code,"_River.shp")
+#- Junctions Shapefile: paste0(gauge_code,"_Junctions.shp")
+#- HRU Shapefile: paste0(gauge_code,"_HRU.shp")
+# -DEM Raster: paste0(gauge_code,"_DEM.tif")
+
+# Load shape file of river basin
+basin_shp <- sf::st_read(file.path(gis_path, basin_shape_file), quiet = TRUE)
+basin_utm <- sf::st_transform(basin_shp, utm42n)
+basin_latlon <- sf::st_transform(basin_shp, crs_project)
+
+# compute centroid of the basin
+basin_centroid <- sf::st_centroid(basin_latlon)
+# get the coordinates of the centroid
+basin_centroid_coord <- sf::st_coordinates(basin_centroid)
+# convert latitude to rad
+lat_rad <- basin_centroid_coord[2] * pi / 180
+
+# if the dem does not exist, download it
+if (!file.exists(file.path(gis_path, "dem.tif"))) {
+  dem_latlon <- elevatr::get_elev_raster(basin_shp, z = 9)
+  # convert dem_latlon to spatRaster
+  dem_latlon <- terra::rast(dem_latlon)
+  # convert to UTM42N
+  dem_utm <- terra::project(dem_latlon, utm42n)
+  terra::writeRaster(dem_utm, file.path(gis_path, "dem.tif"))
+  
+} else {
+  dem_utm <- terra::rast(file.path(gis_path, "dem.tif"))
+}
+
+# gauge location and elevation
+gauge_shp <- 
+  sf::st_read(file.path(gis_path, gauge_shape_file), quiet = TRUE)
+
+gauge_coord <- gauge_shp %>% sf::st_coordinates()
+gauge_Z <- terra::extract(dem_utm, gauge_shp)[2]
+gauge_Z <- as.numeric(gauge_Z)
+print(paste("Gauge elevation:", gauge_Z, "masl"))
+
+# Calculate the basin area
+basin_area_m2 <- sf::st_area(basin_latlon) |> units::set_units(m2)
+basin_area_km2 <- basin_area_m2 |> units::set_units(km2)
+print(paste("Basin area:", round(basin_area_km2), "km2"))
+```
+
+### Hypsometric Curve
+
+```{r}
+#| message: false
+#| warning: false
+
+# first mask the dem with the basin
+dem_utm <- dem_utm %>% terra::mask(terra::vect(basin_utm))
+dem <- terra::project(dem_utm, "EPSG:4326")
+# save dem on disk
+terra::writeRaster(dem, file.path(gis_path, "dem_atbashy_basin.tif"), 
+                   overwrite = TRUE)
+
+
+# Calculate hypsometric curve
+hypsometric_results <- calculate_hypsometric_curve(dem_utm, relative_height = FALSE, plot = FALSE)
+
+# Access the hypsometric curve results
+curve_data <- hypsometric_results$curve_data  # DataFrame with all calculations
+
+# save figure
+ggsave(file.path(fig_rep, paste0(river_name,"_hypsometric_curve.pdf")), 
+       plot = hypsometric_results$plot, width = 12, height = 8, units = "cm", dpi = 600)
+
+# Plot to screen
+hypsometric_results$plot
+```
+
+
+## 1.4 Glacier outlines (RGI v6)
+
+Currently only working with RGI 6.0 (not 7.0). This could be updated at one point in time. However, Rounce et al. also work with v6, so there is no immediate need to do so.
+
+```{r}
+#| warning: false
+#| message: false
+
+# Randolph Glacier Inventory (RGI) version 6.0 for glacier outlines in the project region. 
+rgi <- sf::st_read(file.path(glacier_path,"rgi_CA_domain_UTM42N.shp"), quiet = TRUE) |> 
+    distinct(RGIId, .keep_all = TRUE)
+rgi <- rgi |> mutate(glacier_area_m2 = as.numeric(st_area(rgi)))
+glaciers <- rgi$RGIId  # List of glaciers
+
+# Basin outlines
+basins <- basin_utm
+
+# add the column DnstNode from code to the basins
+basins$DnstrNode <- gauge_code
+basins <- basins |> mutate(basin_area_m2 = as.numeric(st_area(basins)))
+
+# Intersect the basins with the glacier outlines to attribute each glacier to a basin. 
+rgi_in_basins <- sf::st_intersection(rgi, basins)
+
+# Basin boundaries may not be consistent with glacier outlines, i.e. some glaciers may end up split into two basins. To avoid for double accounting of the glacier runoff, we determine an area weight which will then be multiplied with the glacier discharge from PyGEM.
+rgi_area_basins <- rgi_in_basins |> 
+  mutate(area_intersected_m2 = as.numeric(st_area(rgi_in_basins)), 
+         weight = area_intersected_m2 / glacier_area_m2) 
+```
+
+## 1.5 Exporting Data
+
+Export Hydrological Modeling Parameters and Basin_Info Parameters
+
+```{r}
+Calibration_Validation_Period <- list(
+  calib_start = calib_start,
+  calib_end = calib_end,
+  valid_start = valid_start,
+  valid_end = valid_end,
+  sec_month = sec_month,
+  hydro_model_time_steps = hydro_model_time_steps
+)
+
+# store to disc
+saveRDS(Calibration_Validation_Period, file.path(data_path, "Calibration_Validation_Period.rds"))
+
+Basin_Info <- list(
+  BasinCode = gauge_code,
+  BasinName = river_name,
+  BasinArea_m2 = basin_area_m2,
+  BasinLat_rad = lat_rad,
+  HypsoData = curve_data$elevation)
+
+saveRDS(Basin_Info, file.path(data_path, "Basin_Info.rds"))
+```
+
+## 1.6 Basin Overview Plot
+
+This is the code to produce a very polished publication figure.
+
+```{r}
+# load required packages
+p_load(ggspatial)
+p_load(ggnewscale)
+
+# SINGLE DIRECTION HILLSHADE
+# dem dataframe
+dem_df <- as.data.frame(dem, xy = TRUE)
+names(dem_df)[3] <- "alt"
+# estimate the slope
+sl <- terrain(dem, "slope", unit = "radians")
+
+# estimate the aspect or orientation
+asp <- terrain(dem, "aspect", unit = "radians")
+
+# calculate the hillshade effect with 45º of elevation
+hill_single <- shade(sl, asp, 
+      angle = 45, 
+      direction = 300,
+      normalize = TRUE)
+
+# convert the hillshade to xyz
+hill_single_df <- as.data.frame(hill_single, xy = TRUE)
+
+# MULTI DIRECTION HILLSHADE
+# pass multiple directions to shade()
+hillmulti <- map(c(270, 15, 60, 330), function(dir){ 
+                    shade(sl, asp, 
+                          angle = 45, 
+                          direction = dir,
+                          normalize = TRUE)}
+  )
+
+# create a multidimensional raster and reduce it by summing up
+hillmulti <- rast(hillmulti) %>% sum()
+
+# multidirectional
+#plot(hillmulti, col = grey(1:100/100))
+
+# convert the hillshade to xyz
+hill_multi_df <- as.data.frame(hillmulti, xy = TRUE) |> 
+  #rename last column to hillshade
+  rename(hillshade = sum)
+
+# Create custom breaks for elevation
+elev_breaks <- seq(floor(min(dem_df$alt)/500)*500, 
+                  ceiling(max(dem_df$alt)/500)*500, 
+                  by = 500)
+
+# Create the enhanced hillshade plot
+pl_topo_glaciers <- ggplot() +
+  # Add hillshade base layer
+  geom_raster(
+    #data = hill_single_df,
+    data = hill_single_df,
+    aes(x, y, fill = hillshade),
+    show.legend = FALSE
+  ) +
+  scale_fill_gradientn(
+    colors = grey.colors(100, start = 0.3, end = 0.9),
+    guide = "none"
+  ) +
+  # Add new scale for elevation
+  new_scale_fill() +
+  # Add elevation layer with transparency
+  geom_raster(
+    data = dem_df,
+    aes(x, y, fill = alt),
+    alpha = 0.6
+  ) +
+  # Custom elevation color scale
+  scale_fill_gradientn(
+    colors = elevation_colors,
+    breaks = elev_breaks,
+    #labels = scales::label_number(suffix = " m"),
+    # Only show labels for breaks divisible by 1000
+   labels = function(x) ifelse(x %% 1000 == 0, paste0(x, " m"), ""),
+    guide = guide_colorbar(
+      direction = "horizontal",
+      title.position = "top",
+      barwidth = 15,
+      barheight = 1,
+      title = "Elevation (masl)"
+    )
+  ) +
+  # Add basin boundary
+  geom_sf(
+    data = basin_latlon,
+    fill = NA,
+    color = "darkgrey",
+    linewidth = 0.1
+  ) +
+  # Labels and title
+  labs(
+    title = paste(river_name, "River Basin"),
+    subtitle = "Terrain Elevation with Hillshade"#,
+    #caption = "Data source: ALOS WORLD 3D - 30m (AW3D30)\nHillshade: 45° elevation, 300° azimuth"
+  ) +
+  # Coordinate system and extent
+  coord_sf(expand = FALSE) +
+  # Enhanced theme
+  theme_void() +
+  theme(
+    # Text elements
+    text = element_text(family = "Arial", color = "grey20"),
+    plot.title = element_text(size = 14, face = "bold", margin = margin(b = 5)),
+    plot.subtitle = element_text(size = 12, margin = margin(b = 10)),
+    plot.caption = element_text(size = 8, color = "grey50", margin = margin(t = 10)),
+    
+    # Grid lines
+    panel.grid = element_blank(),
+    
+    # Legend formatting
+    legend.position = "bottom",
+    legend.title = element_text(size = 10, face = "bold"),
+    legend.text = element_text(size = 8),
+    legend.margin = margin(t = 10),
+    
+    # Plot margin
+    plot.margin = margin(t = 10, r = 10, b = 10, l = 10, unit = "pt")
+  ) +
+  # Add scale bar and north arrow
+  ggspatial::annotation_scale(
+    location = "br",
+    width_hint = 0.2,
+    style = "ticks",
+    text_family = "Arial"
+  ) +
+  ggspatial::annotation_north_arrow(
+    location = "tl",
+    which_north = "true",
+    pad_x = unit(0.2, "in"),
+    pad_y = unit(0.2, "in"),
+    style = ggspatial::north_arrow_minimal()
+  ) +
+# Add glaciers shape
+geom_sf(
+    data = rgi_in_basins,
+    fill = "#A5F2F3",
+    color = "steelblue",
+    alpha = 0.3  # Added some transparency
+)
+```
+
+Now, we plot basin, glaciers and rivers.
+
+```{r}
+#| warning: false
+#| message: false
+#| echo: false
+
+# load packages
+p_load(whitebox)
+
+# Set River threshold
+streams_threshold <- 100 # 100 is a good value for a beautiful river network visualization
+
+# First need to fill depressions in DEM
+wbt_fill_depressions(
+  dem = file.path(gis_path, "dem_basin.tif"),
+  output = file.path(gis_path, "dem_basin_filled.tif")
+)
+
+# Create D8 flow pointer grid
+wbt_d8_pointer(
+    dem = file.path(gis_path, "dem_basin_filled.tif"),
+    output = file.path(gis_path, "dem_basin_d8_pointer.tif")
+)
+
+# Calculate flow accumulation 
+wbt_d8_flow_accumulation(
+  input = file.path(gis_path, "dem_basin_filled.tif"),
+  output = file.path(gis_path, "dem_basin_flow_acc.tif")
+)
+
+# Extract streams using a threshold
+wbt_extract_streams(
+  flow_acc = file.path(gis_path, "dem_basin_flow_acc.tif"),
+  output = file.path(gis_path, "dem_basin_streams.tif"), 
+  threshold = streams_threshold  # Adjust this threshold value as needed
+)
+
+# Convert raster streams to vector
+wbt_raster_streams_to_vector(
+  streams = file.path(gis_path, "dem_basin_streams.tif"),
+  d8_pntr = file.path(gis_path, "dem_basin_d8_pointer.tif"),
+  output = file.path(gis_path, "streams_basin.shp")
+)
+
+# Read streams
+dem_crs <- st_crs(basin_latlon)
+streams <- sf::st_read(file.path(gis_path, "streams_basin.shp")) |> 
+  sf::st_set_crs(dem_crs)
+
+# To vary the stream thickness based on downstream distance or flow accumulation, we need stream ordering. We can add this using WhiteboxTools' stream order functions. The final plot then looks like this.
+
+# After creating the initial streams, calculate Strahler stream order
+wbt_strahler_stream_order(
+    streams = file.path(gis_path, "dem_basin_streams.tif"),
+    d8_pntr = file.path(gis_path, "dem_basin_d8_pointer.tif"),
+    output = file.path(gis_path, "dem_basin_streams_ordered.tif")
+)
+
+# Convert ordered streams to vector
+wbt_raster_streams_to_vector(
+    streams = file.path(gis_path, "dem_basin_streams_ordered.tif"),
+    d8_pntr = file.path(gis_path, "dem_basin_d8_pointer.tif"),
+    output = file.path(gis_path, "streams_basin_ordered.shp")
+)
+
+# Read and set CRS
+streams_ordered <- sf::st_read(file.path(gis_path, "streams_basin_ordered.shp")) %>%
+    sf::st_set_crs(dem_crs)
+
+# Now plot with varying line width based on stream order
+pl_topo_glaciers_streams <- pl_topo_glaciers +
+geom_sf(
+    data = streams_ordered,
+    aes(linewidth = STRM_VAL),  # ORDER is the column name WhiteboxTools creates
+    color = "blue",
+    alpha = 0.3
+) +
+scale_linewidth_continuous(
+    range = c(0.2, 0.5),  # Adjust min/max line widths
+    guide = "none"  # Remove legend if you don't want to show it
+)
+
+# save figure
+ggsave(file.path(fig_rep,"basin_topo_glaciers_streams.png"), 
+  pl_topo_glaciers_streams, width = 10, height = 5, dpi = 600)
+
+#plot figure
+pl_topo_glaciers_streams <- pl_topo_glaciers_streams + 
+  theme(text = element_text(family = "sans"))
+
+pl_topo_glaciers_streams
+```
+
+# 2 ANALYSIS OF DISCHARGE
+
+ Comprehensive analysis of discharge data at both monthly and daily time scales. This includes creating consistent time series by filling gaps, visualizing long-term trends, identifying seasonal patterns, analyzing cold/warm season discharge variations, and establishing calibration and validation periods for hydrological modeling.
+
+## 2.1 Monthly Data
+
+### Plot Time Series of Monthly Discharge
+
+Plotting the monthly time series reveals the long-term trends and seasonal patterns in the discharge data. There are some funny patters in the 1970ies. We will only use the data from 1979 onwards from which CHELSA V21 data is available.
+
+```{r}
+#| warning: false
+#| message: false
+
+p_load(timetk)
+
+q_mon <- q_mon |> mutate(value = data)
+
+# Calculate long-term average by month
+monthly_averages <- q_mon %>%
+  mutate(month = month(date)) %>%
+  group_by(month) %>%
+  summarise(avg_value = mean(value, na.rm = TRUE))
+
+# Fill NA values with long-term average for that month
+q_mon <- q_mon %>%
+  mutate(month = month(date)) %>%
+  left_join(monthly_averages, by = "month") %>%
+  mutate(value = coalesce(value, avg_value)) %>%
+  dplyr::select(-month, -avg_value)
+
+# Create the plot with a publication figure of the discharge time series
+discharge_plot <- plot_discharge_timeseries(
+  data = q_mon,
+  date_col = "date",
+  value_col = "value",
+  gauge_name = gauge_name,
+  gauge_code = gauge_code
+)
+
+# save plot
+ggsave(file.path(fig_rep, "discharge_timeseries.png"), 
+       plot = discharge_plot,
+       width = 10, height = 5)
+
+# Display the plot
+discharge_plot
+```
+
+### Seasonal Diagnostics
+
+The seasonal diagnostics plot shows the mean, median, and interquartile range of discharge values for each month. This plot helps identify any seasonal patterns or trends in the data.
+
+```{r}
+#| warning: false
+#| message: false
+#| echo: false
+
+p_load(patchwork)
+
+# Example usage:
+# Assuming your dataframe is called 'atbashy_data' with columns 'date' and 'value'
+pl <- plot_seasonal_diagnostics(q_mon)
+
+ggsave(file.path(fig_rep,"seasonal_diagnostics.pdf"), plot = pl,
+       width = 10, height = 5)
+
+# plot on screen
+pl
+```
+
+
+### Calibration and Validation Periods
+
+Calibration period: 1979 - 1990
+Validation period: 1991 - 1996
+Simulation Period: 2000 - 2023 (Note: This requires us to resort to ERA5 forcing data fetched via the data gateway).
+
+```{r}
+#| warning: false
+#| message: false
+#| echo: false
+
+# params
+plot_point_size <- 1
+
+# Create the 'Period' column
+q_plot <- q_mon
+
+q_plot$Period <- ifelse(
+  q_plot$date >= calib_start & q_plot$date <= calib_end, "Calibration",
+  ifelse(
+    q_plot$date >= valid_start & q_plot$date <= valid_end, "Validation",
+    NA  # Assign NA to dates outside the defined periods
+  )
+)      
+
+q_hist_plot <- ggplot(data = q_plot, aes(x = date, y = value, group = 1)) +
+  geom_line(aes(color = Period), size = 0.5) +
+  geom_point(data = subset(q_plot, Period == "Calibration"), 
+             color = "black", size = plot_point_size) +
+    geom_point(data = subset(q_plot, Period == "Validation"), 
+               color = "red", size = plot_point_size) +
+  labs(#title = "Calibration and Validation Periods",
+       x = "Date",
+       y = "Discharge [m3/s]",
+       color = "Period") +
+  theme_bw()  +
+  scale_color_manual(values = c("Calibration" = "black", 
+                                "Validation" = "red")) +
+  theme(
+    #plot.title = element_text(hjust = 0.5),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "top"
+    #panel.grid.major = element_line(color = "grey90"),
+    #panel.grid.minor = element_line(color = "grey90")
+  ) +
+  scale_x_date(date_breaks = "1 year", date_labels = "%Y")
+
+# save to figures repository
+ggsave(file.path(fig_rep,"calibration_validation_periods.pdf"), 
+       q_hist_plot, width = 10, height = 5)
+ggsave(file.path(fig_rep,"calibration_validation_periods.png"), 
+       q_hist_plot, width = 10, height = 5)
+
+# Plot on screen
+q_hist_plot
+
+# save q_plot dataframe for quick loading in model script
+saveRDS(q_plot, file.path(paste0(data_path,"/Discharge"), 
+                          "q_cal_val.rds"))
+```
+
+# 3 GLACIER DATA
+
+This section processes glacier data for the basin, including volume calculations, spatial analysis, extraction of glacier discharge, and visualization of melt patterns. It handles historical observations and future projections under various climate scenarios, preparing the data for integration with hydrological models.
+
+## 3.1 Background
+
+Note, these code snippets are taken from the script Ex6_Glacier_data.qmd.
+
+For more background, please consult Chapter 6.7 in the CAHAM handbook at https://hydrosolutions.github.io/caham_book/.
+
+We are extracting the glacier runoff from the PyGEM model for the Atbashy basin. The glacier runoff is extracted for each glacier and then aggregated by basin. The glacier runoff is then used as input for the hydrological model. The glacier runoff data can be downloaded from the following publication: Rounce et al. 2023: Global glacier change in the 21st century: Every increase in temperature matters (https://www.science.org/doi/10.1126/science.abo1324)
+
+
+### Glacier volume calculation using Erasov method
+
+For more information on the Erasov method, please consult the CAHAM handbook at https://hydrosolutions.github.io/caham_book/.
+
+
+```{r}
+# Apply the calculation
+results <- calculate_total_glacier_volume(rgi_in_basins)
+print(paste("total glacier volume in km^3:", 
+    round(sum(results$glacier_volume_km3), 2)))
+```
+
+
+### Remove glacier areas from basin by cropping
+
+Checking if masking was successful by plotting the basin and the masked basin.
+
+```{r}
+# remove glacier areas from basin by cropping
+basins_masked <- st_difference(basins, st_union(rgi_in_basins))
+
+# validate masking
+ggplot() +
+  geom_sf(data = basins_masked, fill = "grey", color = "black") +
+  theme_minimal() +
+  # add title
+  labs(title = "Basin Masked by Glacier Outlines") +
+  # add north arrow and scale bar
+  ggspatial::annotation_north_arrow(location = "tl", 
+                                    which_north = "true", pad_x = unit(0.2, "in"), 
+                                    pad_y = unit(0.2, "in"), 
+                                    style = ggspatial::north_arrow_fancy_orienteering()) +
+  ggspatial::annotation_scale(location = "br", width_hint = 0.2)
+```
+
+## 3.2 Extract and aggregate glacier discharge for each glacier, aggregate by basin
+
+0.  You need a login for USGS Earth Data here https://ers.cr.usgs.gov/register
+1.  Get the download script for the data you require from https://nsidc.org/data/data-access-tool/HMA2_GGP/versions/1
+2.  Open a Linux terminal in the folder and run the download script
+3.  Open the R project and run the Rmd script to extract mean glacier runoff per basin
+
+Note, in the code below, we have the path to the original Rounce et al. dataset hardwired! This is not good practice but does the job since we have to run the code only once now to get things done.
+
+```{r}
+# File to look for
+file_name <- "monthly_per_glacier_runoff_river_basin.RData"
+full_path <- file.path(glacier_path, file_name)
+
+# Check if the file exists
+if (file.exists(full_path)) {
+    # Load the RData file
+    load(full_path)
+    cat("Monthly per glacier runoff data loaded successfully.\n")
+    
+} else {
+    
+    # Extracting monthly data from Rounce et al. (2023) dataset
+    cat("Monthly per glacier runoff data not found. Extracting data from Rounce et al. (2023) dataset. \n")
+    # Data location
+    ncfilelist <- list.files(path = "/Users/tobiassiegfried/hydrosolutions Dropbox/Tobias Siegfried/1_HSOL_PROJECTS/PROJECTS/[2020-06-TW] Currricula Strengthening CA/CourseMaterials/Handbook/HydrologicalModeling_CentralAsia_Data/REFERENCE_CaseStudyPacks/CENTRAL_ASIA_DOMAIN/GLACIERS/Rounce_CMIP6_glacier_evolution", pattern = ".*_glac_runoff_fixed_monthly_.*.nc$",  full.names = TRUE)
+    
+    monthly_per_glacier_runoff <- NULL
+    glac_runoff_basin <- NULL
+    
+    for (ncfile in ncfilelist) {
+        
+        # Open a file for reading
+        file <- ncdf4::nc_open(ncfile)
+        # file returns the content of the ncfile. Glacier runoff at a fixed outflow 
+        # point is given in m3 each months. 
+        
+        # Get the RGI IDs and the glacier indices used in the PyGEM data set
+        rgiid <- ncdf4::ncvar_get(file, "RGIId")
+        
+        # Check if the glaciers in the nc files are in one of our basins
+        if (sum(rgiid %in% glaciers) == 0) {
+            # Glaciers not present in the CA basins
+            next
+            
+        } else {
+            
+            # Get the rcp identifyer from the file name
+            rcp <- str_extract(ncfile, "ssp\\d{3}")
+            
+            # Get list of models used as climate forcing
+            models <- ncdf4::ncvar_get(file, "Climate_Model")
+            
+            # Get dates for the monthly time series. 
+            # The time series starts on January 1, 2000. 
+            time <- ncdf4::ncvar_get(file, "time")  # In days
+            date <- as_date("2000-01-01") + time
+            
+            # Get the glacier discharge data
+            test <- ncdf4::ncvar_get(file, "glac_runoff_fixed_monthly")
+            
+            # Calculate mean and std over all climate forcing models
+            test_model_mean <- apply(test, c(1,2), mean)
+            # test_model_sd <- apply(test, c(1,2), sd)
+            
+            # Now convert to tibble and long format, filter out the rgiids that are not 
+            # located in one of our basins. 
+            rownames(test_model_mean) <- paste0(date)
+            colnames(test_model_mean) <- paste0(rgiid)
+            
+            tbl_mean <- as_tibble(test_model_mean, rownames = "date", 
+                                  .name_repair = "check_unique") |> 
+                dplyr::select(all_of(rgiid[rgiid %in% glaciers])) |> 
+                mutate(date = date) |> 
+                pivot_longer(-date, names_to = "rgiid", values_to = "qgl_m3month") |> 
+                mutate(ssp = rcp)
+            
+            # Save monthly per-glacier runoff
+            monthly_per_glacier_runoff <- rbind(monthly_per_glacier_runoff, tbl_mean)
+            
+        }
+    } 
+    
+    save(monthly_per_glacier_runoff, file = full_path)
+}
+```
+
+## 3.3 Compute Basin Aggregates
+
+```{r}
+# Check if file exists in directory
+if (file.exists(file.path(glacier_path, "monthly_glacier_runoff_agg_basin.RData"))) {
+    # Load the RData file
+    load(file.path(glacier_path, "monthly_glacier_runoff_agg_basin.RData"))
+    cat("Monthly per glacier runoff data loaded successfully.\n")
+    
+} else {
+    cat("Monthly per glacier runoff data not found. Aggregating now. \n")
+    monthly_runoff_agg_basin <- monthly_per_glacier_runoff |> 
+        left_join(rgi_area_basins |>
+                      dplyr::select(RGIId, DnstrNode, weight), 
+                  by = c("rgiid" = "RGIId")) 
+    
+    monthly_runoff_agg_basin2 <- monthly_runoff_agg_basin |> 
+        group_by(date, ssp, DnstrNode) |> 
+        summarise(glac_runoff_m3month = sum(qgl_m3month * weight)) |> 
+        ungroup() |> 
+        mutate(model = "mean") |> 
+        rename(scenario = ssp) |> 
+        drop_na()
+    
+    # save
+    save(monthly_runoff_agg_basin2, 
+         file = file.path(glacier_path, 
+                          "monthly_glacier_runoff_agg_basin.RData"))
+}
+```
+
+## 3.4 Norm Glacier Melt
+
+This is used for back extension. We take the norm of the first 5 years of the 21st century, assuming that this is somehow representative for late 20th century glacier melt.
+
+```{r}
+#| message: false
+#| warning: false
+
+# Calculate average monthly glacier melt between 2000 and 2023
+norm_glacier_melt <- monthly_runoff_agg_basin2 |> 
+  dplyr::filter(date >= as_date("2000-01-01") & date <= as_date("2004-12-01")) |>
+  mutate(month = month(date)) |> 
+  group_by(month, DnstrNode) |> 
+  summarise(glac_runoff_m3month = mean(glac_runoff_m3month)) |> 
+  ungroup() |> 
+  mutate(discharge_m3s = glac_runoff_m3month / sec_month)
+
+# Create enhanced plot
+pl <- ggplot(norm_glacier_melt, aes(x = month, y = discharge_m3s)) + 
+  # Add smoothed line
+  geom_line(aes(color = DnstrNode), linewidth = 1) +
+  # Add points
+  geom_point(aes(color = DnstrNode), size = 2) +
+  
+  # Customize facets
+  facet_wrap(~DnstrNode, scales = "free_y", 
+             labeller = labeller(DnstrNode = function(x) paste("Basin", x))) +
+  
+  # Customize scales
+  scale_x_continuous(
+    breaks = 1:12,
+    labels = month.abb,
+    expand = expansion(mult = c(0.02, 0.02))
+  ) +
+  scale_y_continuous(
+    labels = function(x) format(x, scientific = FALSE, big.mark = ","),
+    expand = expansion(mult = c(0.02, 0.1))
+  ) +
+  scale_color_viridis_d(end = 0.8) +
+  
+  # Labels
+  labs(
+    title = "Average Monthly Glacier Melt (2000-2023)",
+    subtitle = "Based on monthly runoff aggregation",
+    x = "Month",
+    y = expression(paste("Discharge [m"^3, "/s]")),
+    color = "Basin ID"
+  ) +
+  
+  # Theme customization
+  theme_minimal() +
+  theme(
+    # Text elements
+    plot.title = element_text(face = "bold", size = 14, margin = margin(b = 10)),
+    plot.subtitle = element_text(color = "grey40", size = 11, margin = margin(b = 20)),
+    axis.title = element_text(size = 11),
+    axis.text = element_text(size = 10),
+    
+    # Panel elements
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_blank(),
+    panel.grid.major.y = element_line(color = "grey90"),
+    panel.spacing = unit(1.5, "lines"),
+    
+    # Legend
+    legend.position = "none",
+    
+    # Facet labels
+    strip.text = element_text(face = "bold", size = 11),
+    strip.background = element_rect(fill = "grey95", color = NA),
+    
+    # Margins
+    plot.margin = margin(t = 20, r = 20, b = 20, l = 20)
+  )
+
+# save plot
+ggsave(
+  filename = file.path(glacier_path, "average_monthly_glacier_melt.png"),
+  width = 10, 
+  height = 6,
+  dpi = 300
+)
+
+# Plot on screen
+pl
+```
+
+
+## 3.5 Extract Monthly Glacier Discharge from 01/01/2000 through 31/12/2023
+
+We will use airGR for hydrological modeling. Hannah's paper on Atbashy has data analyzed from 2017 - 2024. Let us extract the data for the glacier runoff. We call the period 2000 - 2024 fut_sim.
+
+```{r}
+q_glac_2000_2024 <-
+   monthly_runoff_agg_basin2 |>
+     dplyr::filter(date >= ymd(paste0(hist_obs_start, "-01-01")) & date <= ymd(paste0(fut_sim_end,"-12-31"))) |> dplyr::select(-DnstrNode, -model)
+
+# First calculate the ensemble statistics
+q_glac_2000_2024_m3sec <- q_glac_2000_2024 |> 
+  group_by(date) |> 
+  summarise(
+    Glacier = mean(glac_runoff_m3month) / sec_month,
+    sd = sd(glac_runoff_m3month) / sec_month
+  ) |> 
+  ungroup()
+
+# Create enhanced plot
+pl <- ggplot(q_glac_2000_2024_m3sec, aes(x = date, y = Glacier)) +
+  # Add confidence interval
+  geom_ribbon(aes(ymin = Glacier - sd, 
+                  ymax = Glacier + sd),
+              fill = "steelblue", alpha = 0.2) +
+  # Add main line
+  geom_line(color = "steelblue", linewidth = 0.8) +
+  
+  # Customize scales
+  scale_x_date(
+    date_breaks = "2 years",
+    date_labels = "%Y",
+    expand = expansion(mult = c(0.02, 0.02))
+  ) +
+  scale_y_continuous(
+    labels = scales::comma_format(),
+    expand = expansion(mult = c(0.02, 0.1))
+  ) +
+  
+  # Labels
+  labs(
+    title = "Glacier Runoff Time Series (2000-2024)",
+    #subtitle = "Ensemble mean with ±1 standard deviation",
+    x = "Year",
+    y = expression(paste("Discharge [m"^3, "/s]"))#,
+    #caption = "Data source: Monthly runoff aggregation"
+  ) +
+  
+  # Theme customization
+  theme_minimal() +
+  theme(
+    # Text elements
+    plot.title = element_text(face = "bold", size = 14, margin = margin(b = 10)),
+    plot.subtitle = element_text(color = "grey40", size = 11, margin = margin(b = 20)),
+    axis.title = element_text(size = 11),
+    axis.text = element_text(size = 10),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    
+    # Panel elements
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_line(color = "grey90"),
+    
+    # Plot margins
+    plot.margin = margin(t = 20, r = 20, b = 20, l = 20),
+    
+    # Caption
+    plot.caption = element_text(color = "grey40", margin = margin(t = 20)),
+    
+    # Background
+    plot.background = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white", color = NA)
+  )
+
+# Save the plot
+ggsave(
+  filename = file.path(glacier_path, "glacier_runoff_timeseries.png"),
+  width = 10, 
+  height = 6,
+  dpi = 600
+)
+
+# Plot on screen
+pl
+
+# Save the data
+write_csv(q_glac_2000_2024_fut_sim, 
+          file = file.path(glacier_path, "q_glac_2000_2024_m3sec.csv"))
+```
+
+## 3.6 Back extension of glacier melt to the 1979 to 1996 period
+
+We need glacier melt between 1979 and 1996. We assume the average monthly glacier melt between 2000 and 2004 to have occurred between these years.
+
+```{r}
+p_load(numform)
+
+# create date sequence
+date_char <- seq(ymd("1979-01-01"), ymd("1999-12-31"), by = "month")
+#date_char <- seq(calib_start, valid_end, by = "month")
+
+backtibble <- tibble(
+  date = as_date(date_char),
+  month = month(date)) |>
+  full_join(norm_glacier_melt, by = "month") |>
+  dplyr::select(-month) |>
+  mutate(glac_runoff_m3s = glac_runoff_m3month/sec_month) |>
+  dplyr::select(-glac_runoff_m3month, -discharge_m3s)
+
+glacier_runoff_ssp126 <- backtibble |>
+  add_row(
+    monthly_runoff_agg_basin2 |>
+      dplyr::filter(scenario == "ssp126") |>
+      mutate(glac_runoff_m3s = glac_runoff_m3month/sec_month) |>  # s/month
+      dplyr::select(-model, -scenario, -glac_runoff_m3month)
+    ) |>
+  pivot_wider(names_from = DnstrNode, values_from = glac_runoff_m3s,
+              names_prefix = "Glacier ")
+
+glacier_runoff_ssp245 <- backtibble |>
+  add_row(
+    monthly_runoff_agg_basin2 |>
+      dplyr::filter(scenario == "ssp245") |>
+      mutate(glac_runoff_m3s = glac_runoff_m3month/sec_month) |>  # s/month
+      dplyr::select(-model, -scenario, -glac_runoff_m3month)) |>
+  pivot_wider(names_from = DnstrNode, values_from = glac_runoff_m3s,
+              names_prefix = "Glacier ")
+
+glacier_runoff_ssp370 <- backtibble |>
+  add_row(
+    monthly_runoff_agg_basin2 |>
+      dplyr::filter(scenario == "ssp370") |>      
+      mutate(glac_runoff_m3s = glac_runoff_m3month/sec_month) |>  # s/month
+      dplyr::select(-model, -scenario, -glac_runoff_m3month)) |>
+  pivot_wider(names_from = DnstrNode, values_from = glac_runoff_m3s,
+              names_prefix = "Glacier ")
+
+glacier_runoff_ssp585 <- backtibble |>
+  add_row(
+    monthly_runoff_agg_basin2 |>
+      dplyr::filter(scenario == "ssp585") |>
+      mutate(glac_runoff_m3s = glac_runoff_m3month/sec_month) |>  # s/month
+      dplyr::select(-model, -scenario, -glac_runoff_m3month)) |>
+  pivot_wider(names_from = DnstrNode, values_from = glac_runoff_m3s,
+              names_prefix = "Glacier ")
+
+glacier_runoff_ssp126 <- glacier_runoff_ssp126 |> 
+  mutate(date = floor_date(as.POSIXct(date, tz = "UTC"), unit = "day")) 
+
+glacier_runoff_hist_obs <- glacier_runoff_ssp126 |>  
+  dplyr::filter(date >= ymd(paste0(hist_obs_start,"-01-01"))) |>
+  dplyr::filter(date <= ymd(paste0(hist_obs_end,"-12-31"))) 
+
+#glacier_runoff_hist_obs <- q_glac_2000_2023_hist_obs
+
+# Assuming glacier_runoff_hist_obs is already defined and loaded with the appropriate data
+glaciers_rsm_hist_obs <- process_glacier_runoff(glacier_runoff_hist_obs)
+
+# Save the data
+file_name <- "glaciers_hist_obs_rsm.csv"
+readr::write_csv(glaciers_rsm_hist_obs, 
+                 file.path(glacier_path, file_name), 
+                 na = "NA", col_names = FALSE)
+
+# not sure we need this below? Let us check...
+# Save to model folder
+
+#glacier_rsm_scen_data_path <- "../05_models/"
+#file2write <- file.path(glacier_rsm_scen_data_path, "17084_glaciers_hist_obs_rsm.csv")
+#readr::write_csv(glaciers_rsm_hist_obs, pathname, na = "NA", col_names = FALSE)
+```
+
+## 3.8 Plot glacier_runoff_hist_obs for cross checking
+
+```{r}
+ggplot(glacier_runoff_hist_obs, aes(x = date, y = `Glacier 16076`)) +
+  geom_line() +
+  labs(title = "Glacier Runoff for historical observation period, 1979 - 1995",
+       x = "Date",
+       y = "Runoff (m3/s)") +
+  theme_minimal() 
+```
+
+## 3.9 Future glacier melt
+
+We now save the results for the four climate scenarios: ssp126, ssp245, ssp370, ssp585 Filter from 2000-01-01 to 2024-12-31 and get them in the correct RS MINERVE format.
+
+```{r}
+glacier_runoff_fut_ssp126 <- glacier_runoff_ssp126 |>  
+  dplyr::filter(date >= ymd(paste0(fut_sim_start,"-01-01"))) |>
+  dplyr::filter(date <= ymd(paste0(fut_sim_end,"-12-31"))) |> 
+    rename(`Glacier 16076 SSP126` = 2)
+
+# glacier_runoff_ssp245
+glacier_runoff_fut_ssp245 <- glacier_runoff_ssp245 |>  
+  dplyr::filter(date >= ymd(paste0(fut_sim_start,"-01-01"))) |>
+  dplyr::filter(date <= ymd(paste0(fut_sim_end,"-12-31")))|> 
+    rename(`Glacier 16076 SSP245` = 2)
+
+# glacier_runoff_ssp370
+glacier_runoff_fut_ssp370 <- glacier_runoff_ssp370 |>  
+  dplyr::filter(date >= ymd(paste0(fut_sim_start,"-01-01"))) |>
+  dplyr::filter(date <= ymd(paste0(fut_sim_end,"-12-31")))|> 
+    rename(`Glacier 16076 SSP370` = 2)
+
+glacier_runoff_fut_ssp585 <- glacier_runoff_ssp585 |>  
+  dplyr::filter(date >= ymd(paste0(fut_sim_start,"-01-01"))) |>
+  dplyr::filter(date <= ymd(paste0(fut_sim_end,"-12-31")))|> 
+    rename(`Glacier 16076 SSP585` = 2)
+
+rsm_ssp126 <- process_glacier_runoff(glacier_runoff_fut_ssp126)
+rsm_ssp245 <- process_glacier_runoff(glacier_runoff_fut_ssp245)
+rsm_ssp370 <- process_glacier_runoff(glacier_runoff_fut_ssp370)
+rsm_ssp585 <- process_glacier_runoff(glacier_runoff_fut_ssp585)
+
+readr::write_csv(rsm_ssp126, 
+                 file.path(glacier_path,"glaciers_fut_ssp126_rsm.csv"), 
+                 na = "NA", col_names = FALSE)
+readr::write_csv(rsm_ssp245, 
+                 file.path(glacier_path,"glaciers_fut_ssp245_rsm.csv"), 
+                 na = "NA", col_names = FALSE)
+readr::write_csv(rsm_ssp370, 
+                 file.path(glacier_path, "glaciers_fut_ssp370_rsm.csv"), 
+                 na = "NA", col_names = FALSE)
+readr::write_csv(rsm_ssp585, 
+                 file.path(glacier_path,"glaciers_fut_ssp585_rsm.csv"), 
+                 na = "NA", col_names = FALSE)
+```
+
+## 3.10 Visualization
+
+```{r}
+#| message: false
+#| warning: false
+#| echo: false
+
+# Apply the function to each dataset
+hist_long <- prepare_glacier_data_mean_annual_runoff(glacier_runoff_hist_obs |> 
+                                                         rename(runoff =2), "obs")
+ssp126_long <- prepare_glacier_data_mean_annual_runoff(glacier_runoff_fut_ssp126 |> 
+                                                           rename(runoff = 2), "ssp126")
+ssp245_long <- prepare_glacier_data_mean_annual_runoff(glacier_runoff_fut_ssp245 |> 
+                                                           rename(runoff = 2), "ssp245")
+ssp370_long <- prepare_glacier_data_mean_annual_runoff(glacier_runoff_fut_ssp370 |> 
+                                                           rename(runoff = 2), "ssp370")
+ssp585_long <- prepare_glacier_data_mean_annual_runoff(glacier_runoff_fut_ssp585 |> 
+                                                           rename(runoff = 2), "ssp585")
+
+# Combine datasets
+combined_data <- bind_rows(hist_long, ssp126_long, ssp245_long, ssp370_long, ssp585_long)
+
+# Create enhanced plot
+glacier_runoff_mean_annual <- ggplot(combined_data, 
+    aes(x = year, y = runoff, color = scenario, linetype = scenario)) +
+    # Add background shading for historical vs future periods
+    annotate("rect", xmin = min(combined_data$year), xmax = 2020,
+             ymin = -Inf, ymax = Inf, fill = "grey95", alpha = 0.5) +
+    
+    # Add main lines
+    geom_line(linewidth = 1) +
+    # add points
+    geom_point(size = 1.5, alpha = 0.7) +
+    # Add smoothed lines
+    geom_smooth(linewidth = .5, method = "loess", span = 0.5, se = FALSE) +
+    
+    # Customize scales
+    scale_x_continuous(
+        breaks = seq(min(combined_data$year), max(combined_data$year), by = 10),
+        expand = expansion(mult = c(0.02, 0.02))
+    ) +
+    scale_y_continuous(
+        labels = scales::comma_format(),
+        expand = expansion(mult = c(0.1, 0.1))
+    ) +
+    # Custom color palette with meaningful colors
+    scale_color_manual(
+        values = c(
+            "obs" = "black",
+            "ssp126" = "#2196F3",  # Blue for low emissions
+            "ssp245" = "#4CAF50",  # Green for moderate emissions
+            "ssp370" = "#FFA000",  # Orange for high emissions
+            "ssp585" = "#F44336"   # Red for very high emissions
+        ),
+        labels = c(
+            "obs" = "Historical",
+            "ssp126" = "SSP1-2.6 (Low)",
+            "ssp245" = "SSP2-4.5 (Moderate)",
+            "ssp370" = "SSP3-7.0 (High)",
+            "ssp585" = "SSP5-8.5 (Very high)"
+        )
+    ) +
+    # Line types for better distinction
+    scale_linetype_manual(
+        values = c(
+            "obs" = "solid",
+            "ssp126" = "solid",
+            "ssp245" = "solid",
+            "ssp370" = "solid",
+            "ssp585" = "solid"
+        ),
+        labels = c(
+            "obs" = "Historical",
+            "ssp126" = "SSP1-2.6 (Low)",
+            "ssp245" = "SSP2-4.5 (Moderate)",
+            "ssp370" = "SSP3-7.0 (High)",
+            "ssp585" = "SSP5-8.5 (Very high)"
+        )
+    ) +
+    
+    # Labels
+    labs(
+        title = "Mean Annual Glacier Runoff Projections",
+        subtitle = "Historical observations and future scenarios",
+        x = "Year",
+        y = expression(paste("Mean Annual Discharge [m"^3, "/s]")),
+        color = "Scenario",
+        linetype = "Scenario"
+    ) +
+    
+    # Theme customization
+    theme_minimal() +
+    theme(
+        # Text elements
+        plot.title = element_text(face = "bold", size = 14, margin = margin(b = 10)),
+        plot.subtitle = element_text(color = "grey40", size = 11, margin = margin(b = 20)),
+        axis.title = element_text(size = 11),
+        axis.text = element_text(size = 10),
+        
+        # Legend
+        legend.position = "bottom",
+        legend.box = "vertical",
+        legend.margin = margin(t = 20),
+        legend.title = element_text(size = 11),
+        legend.text = element_text(size = 10),
+        
+        # Panel elements
+        panel.grid.minor = element_blank(),
+        panel.grid.major = element_line(color = "grey90"),
+        
+        # Plot margins
+        plot.margin = margin(t = 20, r = 20, b = 20, l = 20),
+        
+        # Background
+        plot.background = element_rect(fill = "white", color = NA),
+        panel.background = element_rect(fill = "white", color = NA)
+    )
+
+# Save the plot for the report
+ggsave(file.path(fig_rep,"glacier_runoff_mean_annual.png"), 
+       plot = glacier_runoff_mean_annual, width = 10, height = 5, dpi = 600)
+
+# Plot on screen
+glacier_runoff_mean_annual
+```
+
+# 4 GENERATION OF HRU
+
+Generates Hydrological Response Units (HRUs) by delineating elevation bands within the basin. The section includes HRU creation, post-processing operations to add attributes like mean elevation and unique identifiers, area calculations, and visualization of the spatial distribution.
+
+## 4.1 HRU Delineation
+
+Note that there are the following options:
+
+-   either work with masked or original basin file
+-   either specify the number of elevation bands or the elevation band width (both now work)
+
+For Atbashy, we select the option to work with dh per elevation band.
+
+```{r}
+#| message: false
+#| warning: false
+
+# configurations
+dh_elband <- 200
+#n_elband <- 10
+
+# OPTION: select regular basin
+basin_utm <- basins |> st_transform(utm42n)
+# OPTIONAL select masked basin (i.e., without glaciers)
+basin_utm <- basins_masked |> st_transform(utm42n)
+
+# Hypsometric curve based delineation
+# mask dem
+dem_masked <- dem_utm |> crop(basin_utm) |> mask(basin_utm)
+dem_masked_vec <- dem_masked[] |> na.omit()
+
+# ===> OPTION: hardwired elevation range
+h_range <- seq(min(dem_masked_vec), max(dem_masked_vec), by = dh_elband) # elevation range steps 
+# ===> OPTION: specific number of elevation bands
+#h_range <- seq(min(dem_masked_vec), max(dem_masked_vec), length.out = (n_elband + 1)) # elevation range steps 
+
+# classify
+dem_utm_class <- classify(dem_utm, h_range)
+# polygonize
+dem_utm_class_poly <- as.polygons(dem_utm_class)
+dem_utm_class_poly_sf <- st_as_sf(dem_utm_class_poly)
+dem_utm_class_poly_sf <- dem_utm_class_poly_sf |> 
+    mutate(layer = seq(nrow(dem_utm_class_poly_sf)))
+# clip and rename
+hru_shp_clipped_utm <- 
+    st_intersection(dem_utm_class_poly_sf, basin_utm) |> 
+    dplyr::select(layer, geometry)
+hru <- hru_shp_clipped_utm 
+
+# validation
+ggplot() +
+  geom_sf(data = hru, fill = "grey", color = "black") +
+  theme_minimal() +
+  # add title
+  labs(title = "Elevation bands") +
+  # add north arrow and scale bar
+  ggspatial::annotation_north_arrow(location = "tl", which_north = "true", 
+    pad_x = unit(0.2, "in"), pad_y = unit(0.2, "in"),
+    style = ggspatial::north_arrow_fancy_orienteering()) +
+  ggspatial::annotation_scale(location = "br", width_hint = 0.2)
+
+# compute number of features (rows) in hru
+nrow_hru <- nrow(hru)
+print(paste0("Number of Elevation Bands: ", nrow_hru))
+```
+
+## 4.2 HRU Post-Processing
+
+### Intersection with Subbasins
+
+This code needs to be used in case we have a more comple basin with n\>1 gauges and the number of associated subbasins. In other words, this code block intersects the elevation bands with subbasins.
+
+!! IMPORTANT -\> RSMINERVE Compliance: Make sure that the basin shapefile contains the subbasin name field as well as the junct_down field as required by RSMINERVE.
+
+#### CASE 1: Single Subbasin
+
+```{r}
+hru$name <- river_name
+```
+
+#### CASE 2: Multiple Subbasins
+
+Note: this needs to be adjusted when we have multiple subbasins! Check Taloqan code, developed for Wakil Wakil.
+
+### Compute Mean Elevation of HRUs
+
+We add the mean elevation to the HRU. This is required information for RSMinerve.
+
+```{r add_Z_to_hru}
+p_load(exactextractr)
+
+zonalStat_Z <- exactextractr::exact_extract(dem_utm,hru,'mean')
+hru$Z <- zonalStat_Z
+#hru %>% plot()
+
+# Add reversed zonalStat_Z to Basin_Info list and store again on disk.
+Basin_Info$ZLayers <- zonalStat_Z |> rev()
+saveRDS(Basin_Info, file.path(data_path, "Basin_Info.rds"))
+```
+
+### Add unique HRU Names
+
+We divide the river basin to subcatchments and HRUs there. These HRUs are ranked according to mean elevation and numbered accordingly.
+
+```{r add_unique_hru_names}
+# unique names in hru
+subbasin_names <- unique(hru$name)
+
+# loop through subbasin_names and add unique numbers to corresponding names
+for (idx in length(subbasin_names)) {
+  subbasin_sel <- hru |> dplyr::filter(name == subbasin_names[idx]) |> dplyr::arrange(Z)
+  subbasin_sel$hru_num <- (1:base::nrow(subbasin_sel))
+  subbasin_sel$name <- paste0(subbasin_sel$name,'_',subbasin_sel$hru_num)
+  
+  if (idx == 1) {
+    res_subbasins <- subbasin_sel
+  } else {
+    res_subbasins <- res_subbasins %>% dplyr::add_row(subbasin_sel)
+  }
+}
+
+res_subbasins$code = gauge_code
+
+hru_named_utm <- res_subbasins %>% dplyr::select(-layer,-hru_num)
+#hru_named_utm %>% plot()
+hru_named_latlon <- hru_named_utm |> st_transform(crs = crs_project) |> st_make_valid()
+
+# convert name to factor
+hru_named_utm$name <- factor(hru_named_utm$name, levels = paste0(paste0(river_name,"_"), 1:nrow_hru))
+hru_named_latlon$name <- factor(hru_named_latlon$name, levels = paste0(paste0(river_name,"_"), 1:nrow_hru))
+```
+
+### Add HRU areas and X,Y coordinates
+
+```{r}
+hru_utm <- post_process_hru(hru_named_utm)
+hru_latlon <- post_process_hru(hru_named_latlon)
+
+# preview hru_utm
+hru_utm |> 
+  dplyr::select(name, area, Z, X, Y) |> 
+  dplyr::arrange(name) |> 
+  head(10)
+```
+
+Improved plotting.
+
+```{r}
+# Create the plot with custom colors
+pl_elevation_bands <- hru_utm |>
+  ggplot() +
+  # HRU polygons with improved aesthetics
+  geom_sf(aes(fill = name),
+          color = "white",
+          linewidth = 0.05) +
+  # Glacier outlines with improved visibility
+  geom_sf(data = rgi_in_basins,
+          fill = "transparent",
+          color = "lightgrey",
+          linewidth = 0.01,
+          linetype = "solid") +
+  # Add basin outline
+  geom_sf(data = basin_latlon,
+          fill = "transparent",
+          color = "darkgrey",
+          linewidth = 0.3) +
+  # Use custom color scale
+  scale_fill_manual(
+    values = atbashy_colors,
+    name = "HRU Name"
+  ) +
+  # Improved theme with better typography
+  theme_void() +
+  theme(
+    # Panel customization
+    panel.grid.major = element_line(color = "grey90"),
+    panel.grid.minor = element_blank(),
+    # Text improvements
+    text = element_text(family = "Arial", color = "grey20"),
+    plot.title = element_text(size = 14, face = "bold"),
+    plot.subtitle = element_text(size = 12),
+    # Legend customization
+    legend.position = "right",
+    legend.title = element_text(face = "bold"),
+    legend.text = element_text(size = 9),
+    # Axis labels
+    axis.title = element_text(size = 10),
+    axis.text = element_text(size = 9)
+  ) +
+  # Add informative labels
+  labs(
+    title = "Hydrological Response Units with Glacier Outlines",
+    subtitle = "Spatial distribution of HRUs and glacier boundaries",
+    #caption = "Data source: HRU shapefile and RGI glacier inventory"
+  ) +
+  # Add scale bar and north arrow
+  ggspatial::annotation_scale(
+    location = "br",
+    width_hint = 0.2
+  ) +
+  ggspatial::annotation_north_arrow(location = "tl", 
+                                    which_north = "true", pad_x = unit(0.2, "in"), 
+                                    pad_y = unit(0.2, "in"), 
+                                    style = ggspatial::north_arrow_fancy_orienteering())
+
+# store elevation band plot
+ggsave(file.path(fig_rep, "elevation_bands.png"),
+       plot = pl_elevation_bands,
+       width = 10,
+       height = 5,
+       dpi = 600)
+
+# Plot on screen
+pl_elevation_bands <- pl_elevation_bands + 
+  theme(text = element_text(family = "sans"))
+pl_elevation_bands
+```
+
+## 4.3 Save Results
+
+```{r store_shapefile_results}
+sf::st_write(hru_utm,file.path(gis_path,"hru_utm.shp"), append = FALSE)
+sf::st_write(hru_latlon,file.path(gis_path,"hru_latlon.shp"), append = FALSE)
+```
+
+# 5 PROCESSING CLIMATE DATA
+
+This extensive section processes climate data from various sources for both historical observations and future projections. It handles temperature and precipitation data, creates formatted files for modeling software, validates precipitation data against observed lapse rates, and performs necessary transformations for hydrological modeling.
+
+## 5.1 HRU Preparation
+
+See previous section.
+
+## 5.2 Load CHELSA V21 data from the online repository
+
+Data are stored in the repository from 1979 until 1999. This covers the historical observation period which is set from 1979 - 1996.
+
+```{r}
+#| message: false
+#| warning: false
+
+# if hist_obs_dir is empty, execute the code block below, else print "CHELSA V21 climate data available"
+if (length(list.files(hist_obs_dir)) == 0) {
+    # create directory if it does not exist
+    dir.create(hist_obs_dir, showWarnings = FALSE)
+    # download data
+    # see also: https://gitlabext.wsl.ch/karger/rchelsa
+    extent <- sf::st_bbox(basin_latlon)
+    extent <- c(extent$xmin, extent$xmax, extent$ymin, extent$ymax) |> unname()
+    
+    startdate <- ymd(paste(hist_obs_start,"-1-1"))
+    enddate <- startdate + years(1) - days(1)
+    # number of years to fetch
+    n_years <- 24
+    
+    for (idx in seq(n_years)) {
+        year_name <- year(startdate) |> as.character()
+        # temperature tas (note: this is in Kelvin, we need to convert to Celsius.)
+        tas <- Rchelsa::getChelsa('tas',extent = extent, startdate = startdate, enddate = enddate)
+        tas <- tas - 273.15
+        # precipitation pr
+        pr <- Rchelsa::getChelsa('pr',extent = extent, startdate = startdate, enddate = enddate)
+        # if not already existing, save tas and pr data on disk
+        if (!file.exists(file.path(hist_obs_dir,paste0("tas_",year_name,".nc")))) {
+            writeCDF(tas, file.path(hist_obs_dir,paste0("tas_",year_name,".nc")),overwrite=TRUE)}
+        if (!file.exists(file.path(hist_obs_dir,paste0("pr_",year_name,".nc")))) {
+            writeCDF(pr, file.path(hist_obs_dir,paste0("pr_",year_name,".nc")),overwrite = TRUE)}
+        # shift dates
+        startdate <- enddate + days(1)
+        enddate <- startdate + years(1) - days(1)
+    }
+} else {
+    print("CHELSA V21 climate data available - Check years!")
+}
+```
+
+This is just to validate data download. It all looks good so far.
+
+```{r}
+year_name <- 1979
+
+# validate data
+tas_2019 <- terra::rast(file.path(hist_obs_dir,paste0("CHELSA_tas__",
+                                                      year_name,"_55_85_30_50_V.2.1.nc")))
+# extract first day
+tas_2019_1 <- tas_2019[[1]]
+
+p_load(tidyterra) # what a glorious package, no more converting to dataframe before plotting with ggplot2.
+# plot
+ggplot() +
+  geom_spatraster(data = tas_2019_1) +
+  scale_fill_viridis_c(name = "Temp (°C)") +
+  coord_sf()
+```
+
+## 5.3 hist_obs: Temperature Data Processing
+
+```{r hist_obs_Climate_Data_Processing}
+#| message: false
+#| warning: false
+#| echo: false
+
+# Parameters
+climate_data_type <- "hist_obs"
+
+# Load HRU shapefile (see section 4.0 above)
+hru_utm <- sf::st_read(file.path(gis_path,"hru_utm.shp"))
+
+# list all climate files
+climate_files_tas <- list.files(hist_obs_dir, pattern = "tas_", full.names = TRUE)
+# only process files up to and including hist_obs_end
+filtered_climate_files_tas <- climate_files_tas |> 
+    keep(~ extract_year(.x) <= hist_obs_end) |> 
+    keep(~ extract_year(.x) >= hist_obs_start)
+
+# Data type
+temp_or_precip <- "Temperature"
+
+# Do the magic
+hist_obs_tas <- 
+    gen_HRU_Climate_CSV_RSMinerve_local(filtered_climate_files_tas,
+        river_name, temp_or_precip, hru_utm, hist_obs_start,
+        hist_obs_end, obs_freq, climate_data_type, crs_project)
+```
+
+
+## 5.4 hist_obs: Precipitation Data Processing
+
+```{r}
+#| message: false
+#| warning: false
+#| echo: false
+
+# list all climate files
+climate_files_pr <- list.files(hist_obs_dir, pattern = "pr_", full.names = TRUE)
+
+# only process files up to and including hist_obs_end
+filtered_climate_files_pr <- climate_files_pr |> 
+    keep(~ extract_year(.x) <= hist_obs_end) |> 
+    keep(~ extract_year(.x) >= hist_obs_start)
+
+# Data type
+temp_or_precip <- "Precipitation"
+
+# Do the magic
+hist_obs_pr <- gen_HRU_Climate_CSV_RSMinerve_local(filtered_climate_files_pr,
+        river_name, temp_or_precip, hru_utm, hist_obs_start,
+        hist_obs_end, obs_freq, climate_data_type, crs_project)
+```
+
+Given the our experience with the very problematic CHELSA V21 forcing in the Zarafshan River basin, we introduce a new Section here for the validation of the precipitation data with observed lapse rate data. This is done by comparing the precipitation data of each elevation band with observed precipitation lapse rates that are obtained from the Soviet compendium on Water Resources of the Soviet Union Amu Darya and Syr Darya (Andrey Yakovlev, Surface water resources. Volume 14 Central Asia, Issue 3 Amudariya).
+
+Note: For Atbashy not implemented.
+
+Below, we compute the elevation band specific norm precipitation (in mm) and the basin average norm precipitation (in mm). The latter is computed by multiplying the elevation band specific norm precipitation with the corresponding elevation band area and dividing it by the total area of the basin without glaciers.
+
+```{r}
+#| message: false
+#| warning: false
+#| echo: false
+
+eb_area <- hru_utm |> dplyr::select(name, area) |> sf::st_drop_geometry() |> type_convert()
+area_no_glaciers <- hru_utm$area |> as.numeric() |> sum() # this is in m^2
+
+data_P <- hist_obs_pr |>
+    slice(-c(1:8)) |>
+    rename(date = Station) |>
+    mutate(date = str_sub(date, start = 1, end = 11)) |>
+    mutate(date = dmy(date)) |> 
+    type_convert()
+
+data_P_long <- data_P |>
+    pivot_longer(cols = -date, names_to = "station", values_to = "value") |>
+    mutate(sensor = "P") 
+
+# Compute total norm precipitation for each elevation band separately (mm / yr)
+pr_norm_eb <- data_P_long |> 
+    filter(sensor == "P") |> 
+    group_by(station) |> 
+    timetk::summarize_by_time(.date_var = date, .by = "1 year", value = sum(value)) |> 
+    summarize(value = mean(value))
+
+# now compute the basin average by multiplying each elevation band value by the corresponding elevation band area in eb_area and then summing the result and dividing it by the total area.
+
+pr_norm_basin <- pr_norm_eb |> 
+    left_join(eb_area, by = c("station" = "name")) |> 
+    mutate(value = value * area) |> 
+    summarize(value = sum(value) / area_no_glaciers) |> 
+    rename(pr_norm_basin = value)
+pr_norm_basin
+
+pr_norm_eb
+```
+
+
+Let us plot the elevation gradient of the precipitation for each elevation band. The data is in pr_norm_eb. 
+
+```{r}
+pl_pr_norm_eb <- pr_norm_eb |> 
+    mutate(
+        # Convert station to factor with correct order
+        station = factor(station, 
+                        levels = paste0("Atbashy_", 1:11)),
+        # Add labels for each bar
+        value_label = sprintf("%.0f", value)
+    ) |>
+    ggplot(aes(x = station, y = value, fill = station)) +
+    # Add columns with custom colors
+    geom_col(width = 0.7) +
+    # Add value labels on top of each bar
+    geom_text(aes(label = value_label),
+              position = position_dodge(width = 0.7),
+              vjust = -0.5,
+              size = 3) +
+    # Add basin average line
+    geom_hline(yintercept = pr_norm_basin$pr_norm_basin, 
+               linetype = "dashed", 
+               color = "navy",
+               linewidth = 0.7) +
+    # Add basin average label
+    annotate("text", 
+             x = 1, 
+             y = pr_norm_basin$pr_norm_basin,
+             label = sprintf("Basin Average: %.0f mm", pr_norm_basin$pr_norm_basin),
+             hjust = -0.1,
+             vjust = -0.5,
+             color = "navy",
+             fontface = "bold") +
+    # Use custom color scale
+    scale_fill_manual(values = atbashy_colors) +
+    # Customize labels
+    labs(title = paste(river_name, "Precipitation Gradient"),
+         subtitle = "Based on CHELSA V2.1 Data",
+         x = "Elevation Band",
+         y = "Annual Precipitation (mm)") +
+    # Improve theme
+    theme_minimal() +
+    theme(
+        # Text improvements
+        text = element_text(family = "Arial"),
+        plot.title = element_text(size = 14, face = "bold"),
+        plot.subtitle = element_text(size = 12),
+        axis.title = element_text(size = 10, face = "bold"),
+        axis.text.x = element_text(angle = 45, hjust = 1, size = 9),
+        axis.text.y = element_text(size = 9),
+        # Remove legend
+        legend.position = "none",
+        # Grid customization
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.grid.major.y = element_line(color = "grey90")
+    ) +
+    # Expand y-axis slightly to accommodate labels
+    scale_y_continuous(expand = expansion(mult = c(0, 0.1)))
+
+# save plot
+ggsave(file.path(fig_rep, "precipitation_elevation_gradient.png"),
+       plot = pl_pr_norm_eb,
+       width = 10,
+       height = 5,
+       dpi = 600)
+
+# plot on screen
+pl_pr_norm_eb
+```
+
+Do the same polished plot with Z on the x-axis, i.e. the mean elevation band elevation.
+
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+
+# prepare elevation band areas (in m2) 
+eb_area <- hru_utm |> dplyr::select(name, area) |> sf::st_drop_geometry() |> type_convert()
+area_no_glaciers <- hru_utm$area |> as.numeric() |> sum() # this is in m^2
+
+#eb_Z <- hru_utm |> dplyr::select(name, Z) |> sf::st_drop_geometry() |> type_convert()
+#eb_Z$Z <- eb_Z$Z |> round()
+
+# add Z from eb_Z to pr_norm_eb
+eb_Z <- hru_utm |> dplyr::select(name, Z) |> sf::st_drop_geometry() |> type_convert()
+eb_Z$Z <- eb_Z$Z |> round()
+
+pr_norm_Z_eb <- pr_norm_eb |> 
+    left_join(eb_Z, by = c("station" = "name")) |>
+    arrange(Z)
+
+# Create an improved precipitation-elevation plot
+pl_pr_norm_Z_eb <- pr_norm_Z_eb |> 
+    # Add station labels for the points
+    mutate(
+        station_label = str_replace(station, "Atbashy_", ""),
+        value_label = sprintf("%.0f mm", value)
+    ) |>
+    ggplot(aes(x = Z, y = value)) +
+    # Add gridlines behind the data
+    theme_minimal() +
+    # Add main line with custom styling
+    geom_line(linewidth = 0.8, 
+              color = "navy") +
+    # Add points with custom styling
+    geom_point(aes(fill = station),
+               size = 3,
+               shape = 21,
+               color = "white",
+               stroke = 0.5) +
+    # Add basin average reference line
+    geom_hline(yintercept = pr_norm_basin$pr_norm_basin, 
+               linetype = "dashed", 
+               color = "navy",
+               linewidth = 0.7,
+               alpha = 0.5) +
+    # Add basin average label
+    annotate("text", 
+             x = min(pr_norm_Z_eb$Z), 
+             y = pr_norm_basin$pr_norm_basin,
+             label = sprintf("Basin Average: %.0f mm", pr_norm_basin$pr_norm_basin),
+             hjust = 0,
+             vjust = -0.5,
+             color = "navy",
+             fontface = "bold") +
+    # Add point labels
+    geom_text(aes(label = station_label),
+              size = 3,
+              vjust = -1.5) +
+    # Use custom color scale matching previous plots
+    scale_fill_manual(values = atbashy_colors) +
+    # Customize axis scales
+    scale_x_continuous(
+        breaks = seq(floor(min(pr_norm_Z_eb$Z)/500)*500, 
+                    ceiling(max(pr_norm_Z_eb$Z)/500)*500, 
+                    by = 500),
+        labels = function(x) sprintf("%d m", x)
+    ) +
+    # Increased frequency of y-axis breaks (changed from 500 to 250)
+    scale_y_continuous(
+        breaks = seq(0, ceiling(max(pr_norm_Z_eb$value)/250)*250, by = 250),
+        labels = function(x) sprintf("%d mm", x),
+        expand = expansion(mult = c(0.02, 0.1))
+    ) +
+    # Add labels
+    labs(title = "Precipitation-Elevation Relationship",
+         subtitle = paste(river_name, "- Based on CHELSA V2.1 Data"),
+         x = "Elevation (masl)",
+         y = "Annual Precipitation (mm/a)") +
+    # Customize theme
+    theme(
+        text = element_text(family = "Arial"),
+        plot.title = element_text(size = 14, face = "bold"),
+        plot.subtitle = element_text(size = 12),
+        axis.title = element_text(size = 10, face = "bold"),
+        axis.text = element_text(size = 9),
+        legend.position = "none",
+        panel.grid.minor = element_blank(),
+        panel.grid.major = element_line(color = "grey90")
+    )
+
+# save figure
+ggsave(file.path(fig_rep, "precipitation_elevation_relationship.png"),
+       plot = pl_pr_norm_Z_eb,
+       width = 10,
+       height = 5,
+       dpi = 600)
+
+# Plot on screen
+pl_pr_norm_Z_eb
+```
+
+
+### hist_obs: Precipitation Rescaling? Y/N
+
+Here, we add the option to rescale precipitation data. This is done by multiplying the precipitation data of each elevation band by a factor. This is useful when we want to adjust the precipitation reanalysis data of each elevation band to better match observed precipitation lapse rates.
+
+```{r}
+# rescale precipitation data? Y/N
+rescale_pr <- "N"
+
+if (rescale_pr == "Y") {
+    # extract the header from hist_obs_pr (first seven rows)
+    hist_obs_pr_header <- hist_obs_pr[1:7,]
+    # extract the data from hist_obs_pr (from row 8 onwards) and convert to dbl.
+    hist_obs_pr_data <- hist_obs_pr[8:nrow(hist_obs_pr),] |> type_convert()
+    # extract Station column
+    hist_obs_pr_station <- hist_obs_pr_data |> dplyr::select(Station)
+    hist_obs_pr_data <- hist_obs_pr_data |> dplyr::select(-Station)
+    # multiply each values in each column with the matching corresponding scaling factor from pr_norm_Z_eb
+    hist_obs_pr_rescaled <- hist_obs_pr_data / pr_norm_Z_eb$scaling_factor
+    hist_obs_pr_data
+    hist_obs_pr_rescaled
+    
+    #reassemble all into hist_obs_pr_rescaled
+    hist_obs_pr_rescaled <- hist_obs_pr_station |> 
+        add_column(hist_obs_pr_rescaled, .name_repair = "unique")
+    # add header on top
+    hist_obs_pr_rescaled <- rbind(hist_obs_pr_header, hist_obs_pr_rescaled)
+} else {
+    hist_obs_pr_rescaled <- hist_obs_pr
+}
+```
+
+## 5.5 hist_obs: Combine All Data and Add Discharge
+
+```{r}
+#| warning: false
+
+forcing_dir <- paste(model_dir, "forcing", sep = "/")
+
+# Combine extracted climate tibbles
+hist_obs_rsm <- hist_obs_tas |> 
+  add_column(hist_obs_pr %>% dplyr::select(-Station),.name_repair = 'unique')
+
+if (rescale_pr == "Y") {
+    hist_obs_rsm_rescaled <- hist_obs_tas |> 
+        add_column(hist_obs_pr_rescaled %>% dplyr::select(-Station),.name_repair = 'unique')
+}
+
+combined_header <- c(names(hist_obs_tas), rbind(names(hist_obs_pr) %>% .[-1]))
+
+if (hydro_model_time_steps == "mon") {q_obs_sim <- q_mon
+} else if (hydro_model_time_steps == "dec") {q_obs_sim <- q_dec 
+} else if (hydro_model_time_steps == "day") {q_obs_sim <- q_dly }
+
+q_obs_sim <- q_obs_sim |> mutate(name = "value") |> 
+    dplyr::select(date,name,value) |> 
+    dplyr::filter(date >= ymd(paste0(hist_obs_start,"-01-01"))) |> 
+    dplyr::filter(date <= ymd(paste0(hist_obs_end,"-12-31"))) |> 
+    mutate(value = as.character(value))
+
+q_obs_sim_wide <- q_obs_sim |> 
+    pivot_wider(values_from = value, names_from = name) |> 
+    arrange(date) |> 
+    rename(discharge = value)
+
+dates_char_Q <- 
+    posixct2rsminerveChar(q_obs_sim_wide$date, tz = "UTC") |>  
+    rename(Station = value) |> 
+    tibble::add_column(q_obs_sim_wide |> dplyr::select(-date))
+
+combined_header <- c(combined_header, names(q_obs_sim_wide) %>% .[-1])
+
+# Combine everything
+hist_obs_rsm <- dplyr::full_join(hist_obs_rsm, dates_char_Q, by = 'Station')
+
+if (rescale_pr == "Y") {
+    hist_obs_rsm_rescaled <- dplyr::full_join(hist_obs_rsm_rescaled,
+                                              dates_char_Q_mon, by = 'Station') |> 
+        dplyr::full_join(dates_char_Q_dec, by = 'Station')
+}
+
+# now finish off by giving the required attributes in the table for the discharge station
+## monthly data
+hist_obs_rsm$discharge[1] = gauge_coord[1]
+hist_obs_rsm$discharge[2] = gauge_coord[2]
+hist_obs_rsm$discharge[3] = gauge_Z 
+hist_obs_rsm$discharge[4] = "Q"
+hist_obs_rsm$discharge[5] = 'Flow'
+hist_obs_rsm$discharge[6] = "m3/s"
+hist_obs_rsm$discharge[7] = 'Constant before'
+
+# do the same for the rescaled dataframe
+if (rescale_pr == "Y") {
+    hist_obs_rsm_rescaled$discharge[1] = gauge_coord[1]
+    hist_obs_rsm_rescaled$discharge[2] = gauge_coord[2]
+    hist_obs_rsm_rescaled$discharge[3] = gauge_Z 
+    hist_obs_rsm_rescaled$discharge[4] = "Q"
+    hist_obs_rsm_rescaled$discharge[5] = 'Flow'
+    hist_obs_rsm_rescaled$discharge[6] = "m3/s"
+    hist_obs_rsm_rescaled$discharge[7] = 'Constant before'
+}
+
+# write to disk
+file2write <- base::rbind(combined_header,hist_obs_rsm)
+readr::write_csv(file2write, 
+                 file.path(model_dir,"forcing/hist_obs_rsm.csv"), 
+                 na = "NA", col_names = FALSE)
+
+# rescaled version
+if (rescale_pr == "Y") {
+    file2write <- base::rbind(combined_header,hist_obs_rsm_rescaled)
+    readr::write_csv(file2write, file.path(forcing_dir,"hist_obs_rsm_rescaled.csv"), na = "NA", col_names = FALSE)
+}
+```
+
+## 5.6 hist_sim: Historical ERA5 Simulations over hist_obs period (1979 - 1996)
+
+hist_sim is ERA5 data from 1979 - 1996.
+
+```{r}
+#| warning: false
+#| echo: false
+#| message: false
+
+# Parameters
+climate_data_type <- "hist_sim"
+
+# read hist_sim file from ./02_data/Forcing/ERA5/ to forcing_dir and rename to hist_sim_ERA5_1979_1996.csv
+fut_sim_RSM <- read_csv('../02_data/Forcing/ERA5/HRU_16076Atbashy_1979-01-01_1996-12-31.csv')
+
+# Write result to disk
+file2write <- base::rbind(head(combined_header,-1),fut_sim_RSM)
+write_csv(file2write, paste0(forcing_dir,"/",climate_data_type,"_",hist_sim_models,"_",
+          gauge_code,"_",hist_sim_start,"_",hist_sim_end,".csv"), col_names = FALSE)
+```
+
+
+<!-- ```{r hist_sim_Climate_Data_Processing} -->
+<!-- #| warning: false -->
+<!-- #| echo: false -->
+<!-- #| message: false -->
+
+<!-- # Parameters -->
+<!-- climate_data_type <- "hist_sim" -->
+<!-- climate_files_tas <- list.files(hist_sim_dir,pattern = "tas_", full.names = TRUE) -->
+<!-- climate_files_pr <- list.files(hist_sim_dir,pattern = "pr_", full.names = TRUE) -->
+
+<!-- # Extract GCM Model-Specific Data -->
+<!-- hist_sim_rsm <- vector(mode = "list", length = length(gcm_Models)) -->
+<!-- names(hist_sim_rsm) <- gcm_Models -->
+
+<!-- for (idxGCM in seq(length(gcm_Models))) { -->
+
+<!--   temp_or_precip <- "Temperature" -->
+<!--   gcm_model <- gcm_Models[idxGCM] -->
+<!--   hist_sim_T <- gen_HRU_Climate_CSV_RSMinerve_local(climate_files_tas[idxGCM], -->
+<!--                                               river_name, -->
+<!--                                               temp_or_precip, -->
+<!--                                               hru_utm, -->
+<!--                                               hist_sim_start, -->
+<!--                                               hist_sim_end, -->
+<!--                                               obs_freq, -->
+<!--                                               climate_data_type, -->
+<!--                                               crs_project) -->
+
+<!--   temp_or_precip <- "Precipitation" -->
+<!--   hist_sim_P <- gen_HRU_Climate_CSV_RSMinerve_local(climate_files_pr[idxGCM], -->
+<!--                                               river_name, -->
+<!--                                               temp_or_precip, -->
+<!--                                               hru_utm, -->
+<!--                                               hist_sim_start, -->
+<!--                                               hist_sim_end, -->
+<!--                                               obs_freq, -->
+<!--                                               climate_data_type, -->
+<!--                                               crs_project) -->
+
+<!--   hist_sim_rsm[[idxGCM]] <- hist_sim_T %>%  -->
+<!--     tibble::add_column(hist_sim_P %>% dplyr::select(-Station),.name_repair = 'unique') -->
+
+<!--   # Write result to disk -->
+<!--   file2write <- base::rbind(combined_header,hist_sim_rsm[[idxGCM]]) -->
+<!--   write_csv(file2write,paste0(forcing_dir,"/",climate_data_type,"_",gcm_model,"_", -->
+<!--             gauge_code,"_",hist_sim_start,"_",hist_sim_end,".csv"), col_names = FALSE) -->
+<!-- } -->
+<!-- ``` -->
+
+
+## 5.7 fut_sim: 'Future' ERA5 Simulations 2000 - 2023
+
+The forcing data has been obtained from the data gateway from 2000 - end of 2024.
+For proper bias correction, we should actually get the data from 1979 onward so that we can do the 
+bias correction properly between CHELSA V21 and ERA5.
+
+Below, we just read the output from the data gateway and write it to disk.
+
+```{r}
+#| warning: false
+#| echo: false
+#| message: false
+
+# dealing with 'future simulations'
+climate_data_type <- "fut_sim"
+
+# read file from ./02_data/Forcing/ERA5/ to forcing_dir and rename to fut_sim_ERA5_2000_2024.csv
+fut_sim_RSM <- read_csv('../02_data/Forcing/ERA5/HRU_16076Atbashy_2000-01-01_2024-12-31.csv')
+
+# Write result to disk
+file2write <- base::rbind(head(combined_header,-1),fut_sim_RSM)
+write_csv(file2write, paste0(forcing_dir,"/",climate_data_type,"_",hydrology_run_Models_Scenarios,"_",
+          gauge_code,"_",fut_sim_start,"_",fut_sim_end,".csv"), col_names = FALSE)
+```
+
+
+# the code below is not needed as we do not carry out GCM simulations
+<!-- ```{r fut_sim_Climate_Data_Processing, echo=FALSE, warning=FALSE} -->
+<!-- #| warning: false -->
+<!-- #| echo: false -->
+<!-- #| message: false -->
+
+<!-- climate_data_type <- "fut_sim" -->
+
+<!-- # Process and Extract GCM Model-Specific Data -->
+<!-- fut_sim_rsm <- base::vector(mode = "list", length = length(gcm_Models_Scenarios)) -->
+<!-- names(fut_sim_rsm) <- gcm_Models_Scenarios # now we have a named list -->
+
+<!-- debug_T <- fut_sim_rsm -->
+
+<!-- for (idxGCM in seq(length(gcm_Models_Scenarios))) { -->
+
+<!--   # GCM Model and Scenario -->
+<!--   str2proc <- gcm_Models_Scenarios[idxGCM] -->
+<!--   gcm_model <- substr(str2proc, 1, nchar(str2proc) - 7) -->
+<!--   gcm_scenario <- substr(str2proc, nchar(str2proc) - 6 + 1, nchar(str2proc)) -->
+
+<!--   # Process files - tas -->
+<!--   temp_or_precip <- "Temperature" -->
+<!--   climate_file_tas <-  -->
+<!--     list.files(fut_sim_dir, -->
+<!--                pattern = paste0("tas_day_",gcm_Models_Scenarios[idxGCM]), -->
+<!--                full.names = TRUE) -->
+<!--   fut_sim_T <- gen_HRU_Climate_CSV_RSMinerve_local(climate_file_tas, -->
+<!--                                              river_name, -->
+<!--                                              temp_or_precip, -->
+<!--                                              hru_utm, -->
+<!--                                              fut_sim_start, -->
+<!--                                              fut_sim_end, -->
+<!--                                              obs_freq, -->
+<!--                                              climate_data_type, -->
+<!--                                              crs_project) -->
+
+<!--   debug_T[[idxGCM]] <- fut_sim_T -->
+
+<!--   # Process files - pr -->
+<!--   temp_or_precip <- "Precipitation" -->
+<!--   climate_file_pr <-  -->
+<!--     list.files(fut_sim_dir, -->
+<!--                pattern = paste0("pr_day_",gcm_Models_Scenarios[idxGCM]), -->
+<!--                full.names = TRUE) -->
+<!--   fut_sim_P <- gen_HRU_Climate_CSV_RSMinerve_local(climate_file_pr, -->
+<!--                                              river_name, -->
+<!--                                              temp_or_precip, -->
+<!--                                              hru_utm, -->
+<!--                                              fut_sim_start, -->
+<!--                                              fut_sim_end, -->
+<!--                                              obs_freq, -->
+<!--                                              climate_data_type, -->
+<!--                                              crs_project) -->
+
+<!--   # Final dataframe -->
+<!--   fut_sim_rsm[[idxGCM]] <- fut_sim_T %>%  -->
+<!--     tibble::add_column(fut_sim_P %>% dplyr::select(-Station),.name_repair = 'unique') -->
+<!--   # Write result to disk -->
+<!--   file2write <- base::rbind(combined_header,fut_sim_rsm[[idxGCM]]) -->
+<!--   readr::write_csv(file2write,paste0(forcing_dir,'/',climate_data_type,"_",gcm_model,"_", -->
+<!--                    gcm_scenario,"_",fut_sim_start,"_",fut_sim_end,".csv"), -->
+<!--                    col_names = FALSE) -->
+<!-- } -->
+<!-- ``` -->
+
+
+# 6 BIAS CORRECTION OF fut_sim
+
+Applies quantile mapping bias correction to future climate simulations, ensuring consistency between historical observations and future projections. This process is critical for reliable climate change impact assessment.
+
+## 6.1 Actual Bias Correction
+
+```{r fut_sim_bcsd, message = FALSE, warning = FALSE}
+# Quantile mapping package
+p_load(qmap)
+
+# Preparations
+## HRUs
+n_hru <- hru_utm |> nrow()
+hru_names <- hru_utm$name
+
+# ================
+# Prepare hist_obs
+# ================
+climate_data_type <- "hist_obs"
+#####################################################################
+#### CHANGE HERE IF ORIGINAL OR RESCALED HIST_OBS DATA SHOULD BE USED
+if (rescale_pr == "Y") {
+  hist_obs_path <- file.path(forcing_dir,"hist_obs_rsm_rescaled.csv")
+} else {
+  hist_obs_path <- file.path(forcing_dir,"hist_obs_rsm.csv")
+}
+#####################################################################
+hist_obs_orig <- hist_obs_path |>  readr::read_csv(col_types = cols(.default = col_character())) 
+# delete first and last column of hist_obs_orig (or. more general, delete first column and all the discharge observations)
+hist_obs_orig <- hist_obs_orig |> dplyr::select(-1,ncol(hist_obs_orig))
+
+# Extract data by groups and convert T to deg. K
+hist_obs_T <- hist_obs_orig[,1:n_hru] |> 
+    slice(-1:-7) |> 
+    type_convert() |> 
+    mutate(across(.cols = everything(), ~ . + 273.15))
+hist_obs_P <- hist_obs_orig[,(n_hru + 1):(2 * n_hru)] |> slice(-1:-7) |> type_convert()
+
+# Fix row names
+names(hist_obs_T) <- hru_names
+names(hist_obs_P) <- hru_names
+
+hist_obs_T_df <- hist_obs_T %>% as.data.frame()
+row.names(hist_obs_T_df) <- hist_obs_dates$Date %>% as.character()
+hist_obs_P_df <- hist_obs_P %>% as.data.frame()
+row.names(hist_obs_P_df) <- hist_obs_dates$Date %>% as.character()
+
+# ================
+# Prepare hist_sim
+# ================
+hist_sim_T_list <- base::vector(mode = "list", length = length(hist_sim_models))
+hist_sim_P_list <- base::vector(mode = "list", length = length(hist_sim_models))
+names(hist_sim_T_list) <- hist_sim_models # now we have a named list
+names(hist_sim_P_list) <- hist_sim_models # now we have a named list
+
+for (idx in seq(length(hist_sim_models))) {
+  hist_sim_path <- 
+    list.files(paste0(model_dir,"/forcing"),
+               pattern = paste0("hist_sim_",hist_sim_models[idx]),
+               full.names = TRUE)
+  hist_sim_orig <- hist_sim_path |> 
+      readr::read_csv(col_types = cols(.default = col_character())) |> 
+      dplyr::select(-Station)
+  
+  hist_sim_T <- hist_sim_orig[,1:n_hru] |> 
+      slice(-1:-7) |> 
+      type_convert() |> 
+      mutate(across(.cols = everything(), ~ . + 273.15))
+  hist_sim_P <- hist_sim_orig[,(n_hru + 1):(2 * n_hru)] |> 
+      slice(-1:-7) |> 
+      type.convert()
+  
+  # Fix row names
+  names(hist_sim_T) <- hru_names
+  names(hist_sim_P) <- hru_names
+  
+  hist_sim_T_df <- hist_sim_T %>% as.data.frame()
+  row.names(hist_sim_T_df) <- hist_sim_dates$Date %>% as.character()
+  hist_sim_P_df <- hist_sim_P %>% as.data.frame()
+  row.names(hist_sim_P_df) <- hist_sim_dates$Date %>% as.character()
+  
+  hist_sim_T_list[[idx]] <- hist_sim_T_df
+  hist_sim_P_list[[idx]] <- hist_sim_P_df
+}
+
+# ===============
+# Prepare fut_sim
+# ===============
+fut_sim_T_list <- base::vector(mode = "list", length = length(hydrology_run_Models_Scenarios))
+fut_sim_P_list <- base::vector(mode = "list", length = length(hydrology_run_Models_Scenarios))
+names(fut_sim_T_list) <- hydrology_run_Models_Scenarios # now we have a named list
+names(fut_sim_P_list) <- hydrology_run_Models_Scenarios
+fut_sim_T_list_bcsd <- fut_sim_T_list
+fut_sim_P_list_bcsc <- fut_sim_P_list
+
+for (idx in 1:length(hydrology_run_Models_Scenarios)) {
+  fut_sim_orig_path <- 
+    list.files(forcing_dir,
+               pattern = paste0("fut_sim_",hydrology_run_Models_Scenarios[idx]),
+               full.names = TRUE)
+  fut_sim_orig <- fut_sim_orig_path %>% 
+    readr::read_csv(col_types = cols(.default = col_character())) %>% dplyr::select(-Station)
+  
+  fut_sim_T <- fut_sim_orig[,1:n_hru] %>% slice(-1:-7) %>% 
+    mutate(across(everything(), ~ as.numeric(.) + 273.15))
+  fut_sim_P <- fut_sim_orig[, (n_hru + 1) : (2 * n_hru)] %>% 
+    slice(-1 : -7) %>% mutate_all(as.numeric)
+  
+  # Fix row names
+  names(fut_sim_T) <- hru_names
+  names(fut_sim_P) <- hru_names
+  
+  fut_sim_T_df <- fut_sim_T %>% as.data.frame()
+  row.names(fut_sim_T_df) <- fut_sim_dates$Date %>% as.character()
+  fut_sim_P_df <- fut_sim_P %>% as.data.frame()
+  row.names(fut_sim_P_df) <- fut_sim_dates$Date %>% as.character()
+  
+  fut_sim_T_list[[idx]] <- fut_sim_T_df
+  fut_sim_P_list[[idx]] <- fut_sim_P_df
+}
+
+# ===================
+# Do quantile mapping
+# ===================
+
+# --- Debugging
+fut_sim_rsm_qmapped <- base::vector(mode = "list", length = length(hydrology_run_Models_Scenarios))
+names(fut_sim_rsm_qmapped) <- hydrology_run_Models_Scenarios # now we have a named list
+# -----
+
+for (idx in seq(length(hydrology_run_Models_Scenarios))) {
+  
+  # Preparation
+  str2proc <- hydrology_run_Models_Scenarios[idx]
+  gcm_model <- fut_sim_models
+  gcm_scenario <- hydrology_run_scenarios
+  
+  # Bias correction
+  hist_sim_T_df_gcmModel <- hist_sim_T_list[[gcm_model]]
+  hist_sim_P_df_gcmModel <- hist_sim_P_list[[gcm_model]]
+  
+  fut_sim_T_df_gcmModel <- fut_sim_T_list[[idx]]
+  fut_sim_P_df_gcmModel <- fut_sim_P_list[[idx]]
+  
+  qmap_param_T_gcm <- fitQmap(hist_obs_T_df, hist_sim_T_df_gcmModel, method = "QUANT", wet.day = FALSE)
+  qmap_param_P_gcm <- fitQmap(hist_obs_P_df, hist_sim_P_df_gcmModel, method = "QUANT")
+  
+  # T bias correction
+  fut_sim_T_df_gcmModel_qmapped <- doQmap(fut_sim_T_df_gcmModel,qmap_param_T_gcm)
+  # Fill 0s where present. Occasionally, there are 0s resulting from the quantile mapping these 
+  # are ironed out here by filling the missing values using the ones from the preceeding observation. 
+  fut_sim_T_df_gcmModel_qmapped[fut_sim_T_df_gcmModel_qmapped == 0] <- NA
+  fut_sim_T_df_gcmModel_qmapped <- zoo::na.locf(fut_sim_T_df_gcmModel_qmapped)
+  # P bias correction
+  fut_sim_P_df_gcmModel_qmapped <- doQmap(fut_sim_P_df_gcmModel,qmap_param_P_gcm)
+
+  # go back to tibble and convert back to deg. C
+  fut_sim_T_gcmModel_qmapped <- fut_sim_T_df_gcmModel_qmapped %>% as_tibble() %>% 
+    add_column(Date = fut_sim_dates$Date,.before = 1)
+  fut_sim_T_gcmModel_qmapped <- fut_sim_T_gcmModel_qmapped %>% mutate(across(-Date, ~ . - 273.15))
+  fut_sim_P_gcmModel_qmapped <- fut_sim_P_df_gcmModel_qmapped %>% as_tibble() %>% 
+    add_column(Date = fut_sim_dates$Date,.before = 1)  
+  
+  fut_sim_T_list[[idx]] <- fut_sim_T_gcmModel_qmapped
+  fut_sim_P_list[[idx]] <- fut_sim_P_gcmModel_qmapped
+  
+  # Export to .csv-file
+  fut_sim_qmapped <- 
+    fut_sim_T_gcmModel_qmapped %>% #dplyr::select(-Date) %>% 
+    tibble::add_column(fut_sim_P_gcmModel_qmapped %>% dplyr::select(-Date),.name_repair = "universal") %>% 
+    mutate(across(.cols = everything(),~ as.character(.))) %>% dplyr::select(-Date)
+  
+  # --- Debugging
+  fut_sim_rsm_qmapped[[idx]] <- fut_sim_qmapped
+  # ---
+  
+  fut_sim_orig_path <- 
+    list.files(forcing_dir,
+               pattern = paste0("fut_sim_",hydrology_run_Models_Scenarios[idx]),
+               full.names = TRUE)
+  fut_sim_orig <- 
+    fut_sim_orig_path %>% 
+    readr::read_csv(col_types = cols(.default = col_character()),col_names = FALSE) 
+  
+  fut_sim_orig_header <- fut_sim_orig %>% dplyr::select(-X1) %>% dplyr::slice(1:8,) 
+  names(fut_sim_qmapped) <- names(fut_sim_orig_header)
+  fut_sim_qmapped <- fut_sim_orig_header  %>% bind_rows(fut_sim_qmapped) %>% 
+    add_column(Station = fut_sim_orig$X1,.before = 1)
+
+  # Write result to disk
+  climate_data_type <- "fut_sim_bcsd"
+  
+  readr::write_csv(fut_sim_qmapped,
+                   paste0(forcing_dir,'/',climate_data_type,"_",gcm_model,"_",
+                          gcm_scenario,"_",fut_sim_start,"_",
+                          fut_sim_end,".csv"), col_names = FALSE)
+}
+```
+
+# 7 VALIDATION OF RESULTS
+
+The final section validates the prepared data through visualization of historical data and future projections. It includes plots of temperature and precipitation for different climate models and scenarios, confirming the successful preparation of model inputs.
+
+## 7.1 Historic Data
+
+First, we load the historic precipitation data.
+
+```{r}
+# From this file
+hist_obs <- read_csv(file.path(forcing_dir,"hist_obs_rsm.csv"), col_names = FALSE)
+#delete the last column in hist_obs (discharge measured at the gauge)
+hist_obs <- hist_obs %>% dplyr::select(-ncol(hist_obs)) 
+
+# ... to this file
+hist_obs_long <- process_rsm_data(hist_obs, "historical") 
+hist_obs_long
+```
+
+## 7.2 Future Data
+
+### Load BCSD Data of all ERA5 Model
+
+```{r}
+#| echo: false
+#| message: false
+#| warning: false 
+
+# fut_sim
+fut_sim_bcsd <- 
+  read_csv(file.path(forcing_dir,
+                     "fut_sim_bcsd_ERA5_run_2000_2024.csv"), 
+           col_names = FALSE)
+
+fut_sim_bcsd_long <- process_rsm_data(fut_sim_bcsd, "hydrology_run")
+
+all_data_era5_bcsd <- bind_rows(era5_bcsd_long) |> mutate(model = "fut_sim")
+
+# hist_obs_rsm
+hist_obs_rsm <- 
+  read_csv(file.path(forcing_dir,
+                     "hist_obs_rsm.csv"), 
+           col_names = FALSE) |> 
+  # delete last column
+  dplyr::select(-ncol(hist_obs_rsm))
+
+hist_obs_rsm_long <- process_rsm_data(hist_obs_rsm, "historical")
+hist_obs_rsm_long <- hist_obs_rsm_long |> mutate(model = "hist_obs")
+
+# combine dataframes
+df <- bind_rows(all_data_era5_bcsd, hist_obs_rsm_long)
+```
+
+### Plot Data, Elevation Band 1
+
+We just make a sample plot to validate the data preparation steps.
+
+```{r}
+#| warning: false
+#| echo: false
+#| message: false
+
+# plot annual mean temperatures (sensor=="T") of df, grouped by model, for station==Atbashy_1. First, compute annual mean, then plot.
+df |> 
+    filter(station == "Atbashy_1") |> 
+    filter(sensor == "T") |> 
+    group_by(model) |> 
+    timetk::summarize_by_time(.by = "year",value = mean(value)) |> 
+    ungroup() |> 
+    ggplot(aes(x = date, y = value, color = model)) +
+    geom_line() +
+    labs(title = paste(river_name, "Temperature at Atbashy_1"),
+         x = "Date",
+         y = "Temperature (°C)") +
+    theme_minimal() +
+    theme(text = element_text(family = "Arial"))
+
+
+
+```
+
+Looking all good. Now, we can proceed with the hydrological modeling and the climate impact analysis. The results are investigated in the corresponding script.

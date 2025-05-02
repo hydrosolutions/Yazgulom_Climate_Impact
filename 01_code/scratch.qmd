@@ -1,0 +1,381 @@
+---
+title: "Scratch"
+author: "Tobias Siegfried, hydrosolutions GmbH"
+format: html
+editor: visual
+---
+
+# Background
+
+Scratch for developing cool code with ariGR hydro modeling
+
+# Change Log
+
+-   2025-04-29: First version
+
+# Libraries
+
+```{r}
+library(pacman)
+p_Load(tidyverse, airGR)
+```
+
+
+# 5. RUN
+
+## 5.1 Run Model
+
+
+
+# X. EXPERIMENTS
+
+There are a few experiments that we can conduct to further improve the model performance. For example, in the computation of the fraction of solid precipitation on the layer, we can calibrate the USACE_Tmin and USACE_Tmax parameters, i.e. the range of the transition temperatures from solid to liquid precipitation.
+
+## X.0 Compute Glazirin Threshold Temperatures for Elevation Bands
+
+This was provided by Andrey. The resulting temperatures are threshold temperatures. > liquid and < solid.
+```{r}
+z_km <- Basin_Info$ZLayers / 1000
+
+deltaT <- 10
+
+Basin_Info$ThresholdTemp <- (1.25 + 0.016 * z_km + 0.207 * z_km^2) - deltaT
+#Basin_Info$ThresholdTemp
+
+# plot threshold temp versus ZLayers in a nice ggplot. For this, we cast ZLayers and Threshold Temp into a data frame
+df <- data.frame(ZLayers = Basin_Info$ZLayers, ThresholdTemp = Basin_Info$ThresholdTemp)
+
+ggplot(data = df, aes(x = ZLayers, y = ThresholdTemp)) +
+  geom_point() +
+  geom_line() +
+  labs(x = "Elevation [masl]", y = "Threshold Temperature [°C]") +
+  ggtitle("Threshold Temperature vs Elevation, Gleb Glazirin Method") +
+  theme_minimal()
+```
+
+
+## X.1 Calibration of sold/liquid preciptation parameters of USACE method
+
+According to the airGR documentation, the USACE method is used to compute the fraction of solid precipitation on the layer. The method requires two parameters: USACE_Tmin and USACE_Tmax. These parameters are used to compute the fraction of solid precipitation on the layer. The source is: USACE (1956), Snow Hydrology, pp. 437. U.S. Army Corps of Engineers (USACE) North Pacific Division, Portland, Oregon, USA.
+
+We use this approach to perturbe elevation specific values. We generate realizations of these parameters using Latin-Hypercube Sampling and then subtract or add these sampled values to the threshold temperatures to arrive at the USACE_Tmin and USACE_Tmax thresholds.
+
+Let us conduct an experiment to calibrate these parameters. 
+
+### Latin-Hypercube Sampling
+```{r}
+# First install and load the package if you haven't already
+# install.packages("lhs")
+p_load(lhs)
+
+# Set the number of samples you want
+n_samples <- 400  # adjust this number according to needs
+
+# Generate normalized LHS (values between 0 and 1)
+set.seed(111)  # for reproducibility
+lhs_design <- randomLHS(n = n_samples, k = 2)
+
+# Scale the values to your ranges:
+# tas_min variations from Glazirin
+Tmin_min <- -5 # -10
+T_min_max <- 3 # 2
+# USACE_Tmax: from -1 to 5
+Tmax_min <- -2 # -1
+T_max_max <- 5 # 5
+
+
+# generate samples
+samples <- data.frame(
+  USACE_Tmin = lhs_design[,1] * (T_min_max - (Tmin_min)) + (Tmin_min),  # scale to [-10, 2]
+  USACE_Tmax = lhs_design[,2] * (T_max_max - (Tmax_min)) + (Tmax_min)     # scale to [-1, 5]
+)
+
+# ensure that Tmax is > Tmin
+samples <- samples |> 
+  filter(USACE_Tmax > USACE_Tmin)
+
+# View first few samples
+head(samples)
+
+# You can plot to visualize the distribution
+plot(samples$USACE_Tmin, samples$USACE_Tmax,
+     xlab = "USACE_Tmin", ylab = "USACE_Tmax",
+     main = "Latin Hypercube Samples")
+```
+
+
+### Run Model for Each Sample
+
+Note, this version of the code below is not parallelzied.
+
+```{r}
+#| warning: false
+
+# run preparation
+# model to use
+fun_model <- airGR::RunModel_CemaNeigeGR4J
+performance_crit <- list()
+
+# loop over the samples
+
+tictoc::tic()
+for (idx in seq(1,nrow(samples))) {
+  # print run number
+  print(paste0("Run number: ", idx))
+  # compute the fraction of solid precipitation on the layer
+  solid_frac_pr <- solid_fraction_elevation_layer(Basin_Info, #dates,
+                                                  tas = inputsModel_ours$LayerTempMean, 
+                                                  tas_min = samples$USACE_Tmin[idx], 
+                                                  tas_max = samples$USACE_Tmax[idx]) 
+  
+  inputsModel_ours$LayerFracSolidPrecip <- solid_frac_pr
+  # overwrite original
+  inputsModel <- inputsModel_ours
+  
+  # What we are doing here is to overwrite the setup prepared in the airGR::CreateInputsModel() script. In otherw rods, we just use the data from the data_preparation script.
+  
+  runOptions_cal <- airGR::CreateRunOptions(FUN_MOD          = fun_model,
+                                            InputsModel      = inputsModel,
+                                            IndPeriod_Run    = indRun_cal,
+                                            IniStates        = NULL,
+                                            IniResLevels     = NULL,
+                                            IndPeriod_WarmUp = warmup_period_ind,
+                                            IsHyst = FALSE,
+                                            warnings = FALSE)
+  
+  inputsCrit_cal <- airGR::CreateInputsCrit(FUN_CRIT    = airGR::ErrorCrit_NSE,
+                                            InputsModel = inputsModel,
+                                            RunOptions  = runOptions_cal,
+                                            transfo = "boxcox",
+                                            Obs         = basin_obs_ts$Q_mm_day_no_glacier[indRun_cal],
+                                            warnings = FALSE)
+  
+  calibOptions <- airGR::CreateCalibOptions(FUN_MOD = fun_model, 
+                                            FUN_CALIB = airGR::Calibration_Michel)
+  
+  # calibrate and keep NSE result
+  outputsCalib <- airGR::Calibration_Michel(InputsModel = inputsModel,
+                                   RunOptions = runOptions_cal,
+                                   InputsCrit = inputsCrit_cal,
+                                   CalibOptions = calibOptions,
+                                   FUN_MOD = fun_model)
+  
+  performance_crit[[idx]] <- outputsCalib$CritFinal
+}
+tic_toc <- tictoc::toc()
+
+```
+
+### Parallel Run
+```{r}
+# Load required packages
+p_load(foreach)
+p_load(doParallel)
+
+# Set up parallel backend
+# Detect number of CPU cores and leave one free for system processes
+n_cores <- parallel::detectCores() - 1
+# Create and register parallel cluster
+cl <- makeCluster(n_cores)
+registerDoParallel(cl)
+
+# Start timing
+tictoc::tic()
+
+# Parallel execution using foreach
+performance_crit <- foreach(idx = 1:nrow(samples),
+                          .packages = c("airGR"),  # Add any other required packages
+                          .errorhandling = "pass") %dopar% {
+  
+  # Print run number (note: in parallel execution, prints might be out of order)
+  cat(sprintf("Run number: %d\n", idx))
+  
+  # Compute the fraction of solid precipitation on the layer
+  solid_frac_pr <- solid_fraction_elevation_layer(Basin_Info,
+                                                  inputsModel_ours$LayerTempMean, 
+                                                  tas_min = samples$USACE_Tmin[idx], 
+                                                  tas_max = samples$USACE_Tmax[idx]) 
+  
+  # Create local copy of inputsModel_ours and modify it
+  inputsModel <- inputsModel_ours
+  inputsModel$LayerFracSolidPrecip <- solid_frac_pr
+  
+  # Create run options
+  runOptions_cal <- airGR::CreateRunOptions(
+    FUN_MOD = fun_model,
+    InputsModel = inputsModel,
+    IndPeriod_Run = indRun_cal,
+    IniStates = NULL,
+    IniResLevels = NULL,
+    IndPeriod_WarmUp = warmup_period_ind,
+    IsHyst = FALSE,
+    warnings = FALSE
+  )
+  
+  # Create input criteria
+  inputsCrit_cal <- airGR::CreateInputsCrit(
+    FUN_CRIT = airGR::ErrorCrit_NSE,
+    InputsModel = inputsModel,
+    RunOptions = runOptions_cal,
+    #transfo = "boxcox",
+    Obs = basin_obs_ts$Q_mm_day_no_glacier[indRun_cal],
+    warnings = FALSE
+  )
+  
+  # Create calibration options
+  calibOptions <- airGR::CreateCalibOptions(
+    FUN_MOD = fun_model, 
+    FUN_CALIB = Calibration_Michel
+  )
+  
+  # Calibrate and return NSE result
+  outputsCalib <- Calibration_Michel(
+    InputsModel = inputsModel,
+    RunOptions = runOptions_cal,
+    InputsCrit = inputsCrit_cal,
+    CalibOptions = calibOptions,
+    FUN_MOD = fun_model
+  )
+  
+  # Return the criterion value
+  outputsCalib$CritFinal
+}
+
+# Stop timing
+time_taken <- tictoc::toc()
+
+# Stop cluster
+stopCluster(cl)
+
+# Convert results to a list if they aren't already
+performance_crit <- as.list(performance_crit)
+```
+
+### Visualize Sampling Results
+```{r}
+#| warning: false
+
+performance_crit_tbl <- tibble(Tmin = samples$USACE_Tmin,
+                               Tmax = samples$USACE_Tmax, 
+                               NSE = unlist(performance_crit))
+
+# Create the ggplot first
+p <- performance_crit_tbl |>
+  ggplot(aes(x = Tmin, y = Tmax, color = NSE)) +
+  geom_point(size = 3) +
+  scale_color_viridis_c() +  # Note: changed from scale_fill_viridis()
+  labs(x = "USACE_Tmin", y = "USACE_Tmax", color = "NSE") +
+  theme_minimal()
+
+# Convert to interactive plot
+plotly::ggplotly(p)
+```
+
+### Calibrate Model with Best Snow / Rain Transition Dataset
+```{r}
+# Get the best performing parameter set
+best_params <- performance_crit_tbl |> 
+  filter(NSE == max(NSE)) |> 
+  dplyr::select(Tmin, Tmax)
+
+# recompute the fraction of solid precipitation on the layer
+solid_frac_pr <- solid_fraction_elevation_layer(Basin_Info, 
+                                                  inputsModel_ours$LayerTempMean, 
+                                                  tas_min = best_params$Tmin, 
+                                                  tas_max = best_params$Tmax) 
+
+inputsModel_ours$LayerFracSolidPrecip <- solid_frac_pr
+
+# overwrite original
+inputsModel <- inputsModel_ours
+
+runOptions_cal <- airGR::CreateRunOptions(FUN_MOD          = fun_model,
+                                          InputsModel      = inputsModel,
+                                          IndPeriod_Run    = indRun_cal,
+                                          IniStates        = NULL,
+                                          IniResLevels     = NULL,
+                                          IndPeriod_WarmUp = warmup_period_ind,
+                                          IsHyst           = FALSE,
+                                          warnings         = FALSE)
+
+inputsCrit_cal <- airGR::CreateInputsCrit(FUN_CRIT         = fun_crit,
+                                          InputsModel      = inputsModel,
+                                          RunOptions       = runOptions_cal,
+                                          transfo          = transfo,
+                                          Obs              = q_obs_cal,
+                                          warnings         = FALSE)
+
+calibOptions <- airGR::CreateCalibOptions(FUN_MOD = fun_model, 
+                                          FUN_CALIB = Calibration_Michel)
+
+# calibrate and keep NSE result
+outputsCalib <- Calibration_Michel(InputsModel = inputsModel,
+                                   RunOptions = runOptions_cal,
+                                   InputsCrit = inputsCrit_cal,
+                                   CalibOptions = calibOptions,
+                                   FUN_MOD = fun_model)
+
+param <- outputsCalib$ParamFinalR
+
+# switch call of function depending on fun_model
+if (model_2_use == "GR4J") {
+  runResults_cal <- RunModel_CemaNeigeGR4J(InputsModel = inputsModel,
+                                           RunOptions = runOptions_cal,
+                                           Param = param)
+} else if (model_2_use == "GR5J") {
+  runResults_cal <- RunModel_CemaNeigeGR5J(InputsModel = inputsModel,
+                                           RunOptions = runOptions_cal,
+                                           Param = param)
+} else if (model_2_use == "GR6J") {
+  runResults_cal <- RunModel_CemaNeigeGR6J(InputsModel = inputsModel,
+                                           RunOptions = runOptions_cal,
+                                           Param = param)
+}
+#runResults_cal <- RunModel_CemaNeigeGR6J(InputsModel = inputsModel,
+#                                         RunOptions = runOptions_cal,
+#                                         Param = param)
+
+plot(runResults_cal, Qobs = basin_obs_ts$Q_mm_day[indRun_cal])
+
+OutputsCrit <- ErrorCrit_NSE(InputsCrit = inputsCrit_cal, OutputsModel = runResults_cal)
+OutputsCrit
+```
+
+### Validation Run
+```{r}
+runOptions_val <- airGR::CreateRunOptions(FUN_MOD          = fun_model,
+                                          InputsModel      = inputsModel,
+                                          IndPeriod_Run    = indRun_val,
+                                          IniStates        = runResults_cal$StateEnd,
+                                          IniResLevels     = NULL)
+
+inputsCrit_val <- airGR::CreateInputsCrit(FUN_CRIT         = fun_crit,
+                                          InputsModel      = inputsModel,
+                                          RunOptions       = runOptions_val,
+                                          transfo          = transfo,
+                                          Obs              = q_obs_val,
+                                          Weights          = weights)
+
+# switch call of function depending on fun_model
+if (model_2_use == "GR4J") {
+  runResults_val <- RunModel_CemaNeigeGR4J(InputsModel     = inputsModel,
+                                           RunOptions      = runOptions_val,
+                                           Param           = param)
+} else if (model_2_use == "GR5J") {
+  runResults_val <- RunModel_CemaNeigeGR5J(InputsModel     = inputsModel,
+                                           RunOptions      = runOptions_val,
+                                           Param           = param)
+} else if (model_2_use == "GR6J") {
+  runResults_val <- RunModel_CemaNeigeGR6J(InputsModel     = inputsModel,
+                                           RunOptions      = runOptions_val,
+                                           Param           = param)
+}
+
+plot(runResults_val, Qobs = basin_obs_ts$Q_mm_day[indRun_val])
+
+OutputsCrit <- ErrorCrit_NSE(InputsCrit = inputsCrit_val, OutputsModel = runResults_val)
+OutputsCrit
+                                          
+```
+
+
